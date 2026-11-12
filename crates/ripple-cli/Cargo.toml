@@ -3,6 +3,7 @@ name = "ripple-cli"
 description = "`rcc` — Ripple Control Center CLI"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [[bin]]

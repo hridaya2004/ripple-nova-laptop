@@ -2,10 +2,11 @@
 
 use std::path::PathBuf;
 
-use ripple_core::fan::{list_profiles, model_dir_for, FanTable};
-use ripple_core::modes::{FanControlByte, OperatingMode};
+use ripple_core::fan::{list_profiles, FanTable};
+use ripple_core::modes::OperatingMode;
 use ripple_core::regs::{addr, duty_from_ec};
 use ripple_core::rgb::RgbRegState;
+use ripple_hw::control::{self, Config, Hsv, Preset, Profile};
 use ripple_hw::{EcAccess, HwError};
 
 use crate::{
@@ -21,6 +22,7 @@ pub fn run(cli: &Cli) -> CmdResult {
         crate::Command::Status => status(cli),
         crate::Command::Monitor { interval } => monitor(cli, *interval),
         crate::Command::Mode { cmd } => mode(cli, cmd),
+        crate::Command::Watch => watch(cli),
         crate::Command::Fan { cmd } => fan(cli, cmd),
         crate::Command::Power { cmd } => power(cli, cmd),
         crate::Command::Rgb { cmd } => rgb(cli, cmd),
@@ -35,7 +37,6 @@ pub fn run(cli: &Cli) -> CmdResult {
 
 fn open_ec(cli: &Cli) -> Result<Box<dyn EcAccess>, String> {
     match cli.backend {
-        Backend::Mock => Ok(Box::new(ripple_hw::mock::samples::ph4())),
         Backend::Acpi => Ok(Box::new(
             ripple_hw::linux::AcpiCallEc::probe().map_err(err)?,
         )),
@@ -45,26 +46,13 @@ fn open_ec(cli: &Cli) -> Result<Box<dyn EcAccess>, String> {
         Backend::Sysfs => Ok(Box::new(
             ripple_hw::linux::SysfsEc::probe().map_err(err)?,
         )),
-        Backend::Auto => {
-            // Prefer real backends; fall back to mock for development.
-            if let Ok(ec) = ripple_hw::linux::AcpiCallEc::probe() {
-                return Ok(Box::new(ec));
-            }
-            if let Ok(ec) = ripple_hw::linux::WmiEc::probe() {
-                return Ok(Box::new(ec));
-            }
-            eprintln!("note: no EC backend available, using --mock image (see `rcc doctor`)");
-            Ok(Box::new(ripple_hw::mock::samples::ph4()))
-        }
+        Backend::Auto => ripple_hw::linux::open_auto().map_err(err),
     }
 }
 
 /// The kernel `uniwill-laptop` sysfs interface (sensors/lightbar/charge/attrs).
-/// Independent of the EC backend; hidden entirely under `--backend mock`.
-fn uniwill(cli: &Cli) -> Result<ripple_hw::linux::SysfsEc, String> {
-    if matches!(cli.backend, Backend::Mock) {
-        return Err("sysfs hidden by --backend mock".into());
-    }
+/// Independent of the EC backend.
+fn uniwill(_cli: &Cli) -> Result<ripple_hw::linux::SysfsEc, String> {
     ripple_hw::linux::SysfsEc::probe().map_err(err)
 }
 
@@ -96,17 +84,25 @@ fn dmi_product() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+fn detected_model(cli: &Cli) -> ripple_core::model::Model {
+    let mut ec = open_ec(cli).ok();
+    ripple_hw::linux::detect_model(ec.as_deref_mut())
+}
+
 fn model_dir(cli: &Cli, explicit: Option<String>) -> Result<PathBuf, String> {
     let oem = oem_dir(cli).ok_or("OEM package dir not found (use --oem-dir)")?;
-    let model = explicit
-        .or_else(|| dmi_product().and_then(|p| model_dir_for(&p)))
-        .ok_or(
-            "could not detect model — pass --model <PH4ARxx|...> \
-             (see `ControlCenter_4.9.47.13/UserFanTables/`)",
-        )?;
+    let model = match explicit {
+        Some(m) => m,
+        None => {
+            let m = detected_model(cli);
+            m.name
+                .ok_or_else(|| format!("model not recognised ({m}) — pass --model <PH4ARxx|...>"))?
+                .to_string()
+        }
+    };
     let dir = oem.join("UserFanTables").join(&model);
     if !dir.is_dir() {
-        return Err(format!("no fan tables for model '{model}' at {}", dir.display()));
+        return Err(format!("no OEM fan tables for model '{model}' at {}", dir.display()));
     }
     Ok(dir)
 }
@@ -259,36 +255,34 @@ fn doctor(cli: &Cli) -> CmdResult {
     } else {
         println!("\nEC:");
     }
-    let mut ec = open_ec(cli)?;
-    println!("  backend     : {}", ec.name());
-    if ec.name() == "mock" {
-        println!("  (no real EC backend active — see the fix block above)");
-    }
-    if let Ok(pid) = ec.read(addr::PROJECT_ID) {
-        let hi = ec.read(addr::PROJECT_ID + 1).unwrap_or(0);
-        let id = (hi as u16) << 8 | pid as u16;
-        println!("  project id  : {id} (0x{id:04x}) low-byte {pid} high-byte {hi}");
-        println!("  (full id → model map: OEM Define.ProjectID)");
-    }
-    if let Ok(s1) = ec.read(addr::SUPPORT_BYTE1) {
-        println!("  support[1]  : {s1:#010b}");
+    match open_ec(cli) {
+        Ok(mut ec) => {
+            println!("  backend     : {}", ec.name());
+            println!("  model       : {}", ripple_hw::linux::detect_model(Some(ec.as_mut())));
+            if let Ok(s1) = ec.read(addr::SUPPORT_BYTE1) {
+                println!("  support[1]  : {s1:#010b}");
+            }
+        }
+        Err(e) => {
+            println!("  backend     : none ({e})");
+            println!("  model       : {}", ripple_hw::linux::detect_model(None));
+        }
     }
 
     println!("\nOEM package:");
     match oem_dir(cli) {
         Some(d) => {
             println!("  root        : {}", d.display());
-            if let Ok(dir) = model_dir(cli, None) {
-                match list_profiles(&dir) {
+            match model_dir(cli, None) {
+                Ok(dir) => match list_profiles(&dir) {
                     Ok(p) => println!(
-                        "  model       : {} profiles: {}",
+                        "  fan tables  : {} profiles: {}",
                         dir.file_name().unwrap_or_default().to_string_lossy(),
                         p.join(", ")
                     ),
-                    Err(e) => println!("  profiles    : error {e}"),
-                }
-            } else {
-                println!("  model       : not detected (pass --model)");
+                    Err(e) => println!("  fan tables  : error {e}"),
+                },
+                Err(e) => println!("  fan tables  : {e}"),
             }
         }
         None => println!("  root        : not found (pass --oem-dir)"),
@@ -417,14 +411,20 @@ fn status(cli: &Cli) -> CmdResult {
     let mut ec = open_ec(cli)?;
 
     println!("mode:");
-    if let Ok(b) = ec.read(addr::MAFAN_CONTROL_BYTE) {
-        println!("  fan control byte: {b:#04x} ({})", fan_mode_name(b));
+    let stock = control::stock(Some(ec.as_mut()));
+    match control::current(ec.as_mut(), &stock, &Config::load().custom) {
+        Ok(Some(p)) => println!("  profile         : {}", p.name().to_lowercase()),
+        Ok(None) => println!("  profile         : unknown (matches no profile)"),
+        Err(e) => println!("  profile         : unreadable ({e})"),
     }
-    if let Ok(pl1) = ec.read(addr::PL1_SETTING) {
-        println!("  PL1 setting     : {pl1} W");
+    if let (Ok(pl1), Ok(pl2)) = (ec.read(addr::PL1_SETTING), ec.read(addr::PL2_SETTING)) {
+        println!("  power limits    : PL1 {pl1} W / PL2 {pl2} W");
     }
-    if let Ok(pl2) = ec.read(addr::PL2_SETTING) {
-        println!("  PL2 setting     : {pl2} W");
+    // Raw control bytes only in debug builds.
+    if cfg!(debug_assertions) {
+        if let Ok(b) = ec.read(addr::MAFAN_CONTROL_BYTE) {
+            println!("  [debug] fan control byte: {b:#04x} ({})", fan_mode_name(b));
+        }
     }
 
     // Sensors: kernel uniwill hwmon first (real hardware), EC fallback.
@@ -459,9 +459,7 @@ fn status(cli: &Cli) -> CmdResult {
     }
 
     println!("battery:");
-    if let Ok(up) = ec.read(addr::BATTERY_CHARGE_LIMIT_UP) {
-        println!("  charge limit    : {up} %");
-    }
+    // TODO(charge-limit): show EC charge limit (BATTERY_CHARGE_LIMIT_UP) once charge limits are wanted again.
     if let Some(u) = &sysfs {
         if let Ok((sel, all)) = u.charge_types() {
             println!("  charge profile  : {sel} (available: {})", all.join(", "));
@@ -474,7 +472,8 @@ fn status(cli: &Cli) -> CmdResult {
         }
     }
 
-    if let Some(u) = &sysfs {
+    let lightbar = control::has_lightbar(ec.as_mut());
+    if let Some(u) = sysfs.as_ref().filter(|_| lightbar) {
         if let Ok((r, g, b, bri)) = u.lightbar() {
             println!("lightbar:");
             println!("  color           : #{r:02x}{g:02x}{b:02x}  brightness {bri}");
@@ -558,7 +557,7 @@ fn monitor(cli: &Cli, interval: f64) -> CmdResult {
         }
     }
 
-    // Fallback: EC registers (acpi/wmi/mock).
+    // Fallback: EC registers (acpi/wmi).
     let mut ec = open_ec(cli)?;
     println!("{:<8} {:>8} {:>8} {:>8}", "t(s)", "dutyL%", "rpm1", "rpm2");
     let mut t = 0.0f64;
@@ -572,41 +571,74 @@ fn monitor(cli: &Cli, interval: f64) -> CmdResult {
     }
 }
 
+fn preset_of(stock: &[Preset; 3], cfg: &Config, p: Profile) -> Preset {
+    match p {
+        Profile::Stock(m) => stock[m as usize],
+        Profile::Custom => cfg.custom,
+    }
+}
+
+/// Apply a profile; prints what was written.
+fn apply_profile(ec: &mut dyn EcAccess, cli: &Cli, stock: &[Preset; 3], cfg: &Config, p: Profile) -> CmdResult {
+    let pr = preset_of(stock, cfg, p);
+    let sysfs = uniwill(cli).ok();
+    control::apply(ec, sysfs.as_ref(), pr)?;
+    println!("mode → {} (PL1 {} W, PL2 {} W, GPU cTGP +{} W)", p.name().to_lowercase(), pr.pl1, pr.pl2, pr.ctgp);
+    if sysfs.is_none() && pr.ctgp > 0 {
+        println!("note: uniwill kernel driver not available, GPU cTGP not applied");
+    }
+    Ok(())
+}
+
 fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
+    let mut ec = open_ec(cli)?;
+    let stock = control::stock(Some(ec.as_mut()));
+    let mut cfg = Config::load();
     match cmd {
         ModeCmd::Get => {
-            let mut ec = open_ec(cli)?;
-            let b = ec.read(addr::MAFAN_CONTROL_BYTE)?;
-            println!("fan control byte: {b:#04x} ({})", fan_mode_name(b));
+            let (pl1, pl2) = (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?);
+            match control::current(ec.as_mut(), &stock, &cfg.custom)? {
+                Some(p) => println!("mode: {} (PL1 {pl1} W, PL2 {pl2} W)", p.name().to_lowercase()),
+                None => println!("mode: unknown (PL1 {pl1} W, PL2 {pl2} W matches no profile)"),
+            }
             Ok(())
         }
         ModeCmd::Set { mode } => {
-            let m: OperatingMode = match mode {
-                ModeChoice::Office => OperatingMode::Office,
-                ModeChoice::Gaming => OperatingMode::Gaming,
-                ModeChoice::Turbo => OperatingMode::Turbo,
-                ModeChoice::Benchmark => OperatingMode::Benchmark,
+            let p = match mode {
+                ModeChoice::Office => Profile::Stock(OperatingMode::Office),
+                ModeChoice::Gaming => Profile::Stock(OperatingMode::Gaming),
+                ModeChoice::Turbo => Profile::Stock(OperatingMode::Turbo),
+                ModeChoice::Custom => Profile::Custom,
             };
-            let mut ec = open_ec(cli)?;
-            // OEM writes the mode's default PL/TCC registers then flips the
-            // active profile; the full sequence is not implemented yet.
-            let (pl1, pl2, tcc) = match m {
-                OperatingMode::Office => (addr::OFFICE_PL1_DEFAULT, addr::OFFICE_PL2_DEFAULT, addr::OFFICE_TCC_OFFSET_DEFAULT),
-                OperatingMode::Gaming => (addr::GAMING_PL1_DEFAULT, addr::GAMING_PL2_DEFAULT, addr::GAMING_TCC_OFFSET_DEFAULT),
-                OperatingMode::Turbo => (addr::GAMING_PL1_DEFAULT, addr::GAMING_PL2_DEFAULT, addr::TURBO_TCC_OFFSET_DEFAULT),
-                OperatingMode::Benchmark => (addr::GAMING_PL1_DEFAULT, addr::GAMING_PL2_DEFAULT, addr::TURBO_TCC_OFFSET_DEFAULT),
-            };
-            let d1 = ec.read(pl1)?;
-            let d2 = ec.read(pl2)?;
-            let t = ec.read(tcc)?;
-            println!(
-                "set mode {} → PL1={d1}W PL2={d2}W TCC offset={t}°C (backend: {})",
-                m.as_str(),
-                ec.name()
-            );
-            ec.write(addr::PL1_SETTING, d1)?;
-            ec.write(addr::PL2_SETTING, d2)?;
+            apply_profile(ec.as_mut(), cli, &stock, &cfg, p)
+        }
+        ModeCmd::Next => {
+            let cur = control::current(ec.as_mut(), &stock, &cfg.custom)?;
+            apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur))
+        }
+        ModeCmd::Custom { pl1, pl2, ctgp } => {
+            let pr = Preset { pl1: *pl1, pl2: *pl2, ctgp: *ctgp };
+            pr.validate()?;
+            cfg.custom = pr;
+            cfg.save()?;
+            println!("custom preset saved: PL1 {pl1} W, PL2 {pl2} W, cTGP +{ctgp} W (apply with `rcc mode set custom`)");
             Ok(())
+        }
+    }
+}
+
+/// Foreground loop: the Linux stand-in for the stock service's mode-button handling.
+fn watch(cli: &Cli) -> CmdResult {
+    let mut ec = open_ec(cli)?;
+    let stock = control::stock(Some(ec.as_mut()));
+    let cfg = Config::load();
+    let mut key = control::open_mode_key()?;
+    println!("watching the mode button (Ctrl+C to stop)");
+    loop {
+        control::wait_mode_key(&mut key)?;
+        let cur = control::current(ec.as_mut(), &stock, &cfg.custom)?;
+        if let Err(e) = apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur)) {
+            eprintln!("error: {e}"); // keep watching, a failed press must not kill the daemon
         }
     }
 }
@@ -654,41 +686,26 @@ fn fan(cli: &Cli, cmd: &FanCmd) -> CmdResult {
                 Ok(())
             }
             CurveCmd::File { path } => {
-                let t = FanTable::load(&path)?;
+                let t = FanTable::load(path)?;
                 println!("{}", serde_json::to_string_pretty(&t).map_err(|e| e.to_string())?);
                 Ok(())
             }
         },
         FanCmd::Boost { state } => {
-            let flag = if state.as_bool() {
-                FanControlByte::FanBoost.to_byte()
-            } else {
-                FanControlByte::Normal.to_byte()
-            };
             let mut ec = open_ec(cli)?;
-            let cur = ec.read(addr::MAFAN_CONTROL_BYTE)?;
-            // Preserve non-mode bits (read-before-write safety rule).
-            let new = (cur & !0xF0) | (flag & 0xF0);
-            ec.write_verified(addr::MAFAN_CONTROL_BYTE, new)?;
-            println!("fan control byte {cur:#04x} → {new:#04x} ({})", fan_mode_name(new));
-            Ok(())
-        }
-        FanCmd::Level { level } => {
-            if *level > 5 {
-                return Err("level must be 0..=5".into());
+            let (old, new) = control::set_boost(ec.as_mut(), state.as_bool())?;
+            if old == new {
+                println!("fan boost already {}", if state.as_bool() { "on" } else { "off" });
+            } else {
+                println!("fan control byte {old:#04x} → {new:#04x} ({})", fan_mode_name(new));
             }
-            let flag = if *level == 0 {
-                FanControlByte::Normal.to_byte()
-            } else {
-                FanControlByte::UserLevel(*level).to_byte()
-            };
-            let mut ec = open_ec(cli)?;
-            let cur = ec.read(addr::MAFAN_CONTROL_BYTE)?;
-            let new = (cur & !0xF0) | flag;
-            ec.write_verified(addr::MAFAN_CONTROL_BYTE, new)?;
-            println!("fan control byte → {new:#04x} ({})", fan_mode_name(new));
             Ok(())
         }
+        FanCmd::Level { level } => Err(format!(
+            "fan level {level} refused: user fan levels (0x81..0x85) read their PWM from tables that are \
+             empty on this EC (curve RAM 3840..4095 is all zero; regs 1859..1862 are GPU cTGP/Dynamic \
+             Boost here), so the fans could be told to stop. Use `fan boost on|off`."
+        )),
     }
 }
 
@@ -701,21 +718,15 @@ fn power(cli: &Cli, cmd: &PowerCmd) -> CmdResult {
             println!("PL4 = {} W", ec.read(addr::PL4_SETTING)?);
             Ok(())
         }
-        PowerCmd::Pl1 { watts } => {
-            // Range guard: EC PL fields are single-byte; sane laptop range.
-            if !(5..=150).contains(watts) {
-                return Err(format!("PL1 {watts} W out of range 5..=150 (use --force later)"));
-            }
-            ec.write_verified(addr::PL1_SETTING, *watts as u8)?;
-            println!("PL1 → {watts} W (readback {} W)", ec.read(addr::PL1_SETTING)?);
-            Ok(())
-        }
-        PowerCmd::Pl2 { watts } => {
-            if !(5..=150).contains(watts) {
-                return Err(format!("PL2 {watts} W out of range 5..=150"));
-            }
-            ec.write_verified(addr::PL2_SETTING, *watts as u8)?;
-            println!("PL2 → {watts} W (readback {} W)", ec.read(addr::PL2_SETTING)?);
+        PowerCmd::Pl1 { watts } | PowerCmd::Pl2 { watts } => {
+            let is_pl1 = matches!(cmd, PowerCmd::Pl1 { .. });
+            let w = u8::try_from(*watts).map_err(|_| format!("{watts} W is out of range"))?;
+            let (reg, other) = if is_pl1 { (addr::PL1_SETTING, addr::PL2_SETTING) } else { (addr::PL2_SETTING, addr::PL1_SETTING) };
+            let other = ec.read(other)?;
+            let (pl1, pl2) = if is_pl1 { (w, other) } else { (other, w) };
+            Preset { pl1, pl2, ctgp: 0 }.validate()?; // 5..=ceiling, PL1 <= PL2
+            ec.write_verified(reg, w)?;
+            println!("PL{} → {w} W (readback {} W)", if is_pl1 { 1 } else { 2 }, ec.read(reg)?);
             Ok(())
         }
         PowerCmd::Tcc { offset } => {
@@ -791,16 +802,33 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
             Ok(())
         }
         RgbCmd::Color { color } => {
-            if color.eq_ignore_ascii_case("off") {
-                println!("rgb off — write path is not implemented yet (EC 1897-1902 or ITE hidraw)");
-                return Ok(());
+            let mut ec = open_ec(cli)?;
+            if !control::has_keyboard_rgb(ec.as_mut()) {
+                return Err("the EC reports no RGB keyboard on this machine".into());
             }
-            let (r, g, b) = parse_hex_color(color)?;
-            println!("rgb color (R={r} G={g} B={b}) — keyboard write path is not implemented yet");
-            Ok(())
+            let rgb = if color.eq_ignore_ascii_case("off") { (0, 0, 0) } else { parse_hex_color(color)? };
+            let hsv = Hsv::from_levels(control::kb_from_8bit(rgb));
+            set_keyboard(ec.as_mut(), hsv)
+        }
+        RgbCmd::Brightness { percent } => {
+            let mut ec = open_ec(cli)?;
+            if !control::has_keyboard_rgb(ec.as_mut()) {
+                return Err("the EC reports no RGB keyboard on this machine".into());
+            }
+            if *percent > 100 {
+                return Err("brightness is 0..=100 (percent)".into());
+            }
+            let base = match Config::load().keyboard {
+                Some(h) => h,
+                None => Hsv::from_levels(control::keyboard_rgb(ec.as_mut())?),
+            };
+            set_keyboard(ec.as_mut(), Hsv { v: *percent, ..base })
         }
         RgbCmd::Lightbar { color } => {
             let u = uniwill(cli)?;
+            if open_ec(cli).is_ok_and(|mut ec| !control::has_lightbar(ec.as_mut())) {
+                eprintln!("note: the EC reports no lightbar on this machine (the kernel exposes the LED anyway), so nothing will light up");
+            }
             if color.eq_ignore_ascii_case("off") {
                 u.set_lightbar(None)?;
                 println!("lightbar off (brightness 0)");
@@ -819,6 +847,17 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
     }
 }
 
+/// Apply a keyboard colour and remember it (the EC cannot hold hue and brightness separately).
+fn set_keyboard(ec: &mut dyn EcAccess, hsv: Hsv) -> CmdResult {
+    control::set_keyboard_hsv(ec, hsv)?;
+    let mut cfg = Config::load();
+    cfg.keyboard = Some(hsv);
+    cfg.save()?;
+    let l = hsv.to_levels();
+    println!("keyboard colour → hue {} sat {} % brightness {} % (EC levels {},{},{} of {})", hsv.h, hsv.s, hsv.v, l.0, l.1, l.2, control::KB_LEVEL_MAX);
+    Ok(())
+}
+
 /// `ff8800` / `#ff8800` → (r, g, b) with a clap-friendly error message.
 fn parse_hex_color(color: &str) -> Result<(u8, u8, u8), String> {
     let hex = color.trim_start_matches('#');
@@ -835,20 +874,14 @@ fn parse_hex_color(color: &str) -> Result<(u8, u8, u8), String> {
 }
 
 fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
-    let mut ec = open_ec(cli)?;
+    // TODO(charge-limit): `battery charge-limit <percent>` and the EC limit reads
+    // (BATTERY_CHARGE_LIMIT_UP/DOWN, 1977/2000) are parked; add back with
+    // `BatteryCmd::ChargeLimit` in main.rs when wanted.
+    let u = uniwill(cli).map_err(|e| format!("charge profiles need the uniwill kernel driver: {e}"))?;
     match cmd {
         BatteryCmd::Get => {
-            println!("charge limit (up)  : {} %", ec.read(addr::BATTERY_CHARGE_LIMIT_UP)?);
-            println!("charge limit (down): {} %", ec.read(addr::BATTERY_CHARGE_LIMIT_DOWN)?);
-            Ok(())
-        }
-        BatteryCmd::ChargeLimit { percent } => {
-            if *percent > 100 {
-                return Err("percent must be 0..=100".into());
-            }
-            ec.write_verified(addr::BATTERY_CHARGE_LIMIT_UP, *percent)?;
-            println!("charge limit → {percent} %");
-            println!("note: kernel attr /sys/class/power_supply/BAT*/charge_control_end_threshold preferred when present");
+            let (sel, all) = u.charge_types()?;
+            println!("charge profile: {sel} (available: {})", all.join(", "));
             Ok(())
         }
         BatteryCmd::Profile { profile } => {
@@ -858,9 +891,6 @@ fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
                 ProfileChoice::Balanced | ProfileChoice::Trickle => "Trickle",
                 ProfileChoice::Healthy | ProfileChoice::LongLife => "Long_Life",
             };
-            let u = uniwill(cli).map_err(|e| {
-                format!("charge profiles need the uniwill kernel driver: {e}")
-            })?;
             let (_sel, all) = u.charge_types()?;
             u.set_charge_types(want)?;
             println!("charge profile → {want} (available: {})", all.join(", "));
@@ -921,13 +951,13 @@ fn system(cli: &Cli, cmd: &Option<SystemCmd>) -> CmdResult {
         }
         Some(SystemCmd::Show { name: Some(name) }) => {
             let n = canonical_attr(name)?;
-            println!("{n} = {}", u.get_attr(&n)?);
+            println!("{n} = {}", u.get_attr(n)?);
             Ok(())
         }
         Some(SystemCmd::Set { name, value }) => {
             let n = canonical_attr(name)?;
-            let new = u.set_attr(&n, value).map_err(|e| {
-                let allowed = attr_value_hint(&n);
+            let new = u.set_attr(n, value).map_err(|e| {
+                let allowed = attr_value_hint(n);
                 if allowed.is_empty() {
                     e.to_string()
                 } else {
@@ -1010,6 +1040,17 @@ fn ec_cmd(cli: &Cli, cmd: &EcCmd) -> CmdResult {
             let mut ec = open_ec(cli)?;
             let v = ec.read(a)?;
             println!("{a} (0x{:03x}) = 0x{v:02x} ({v})", a);
+            Ok(())
+        }
+        EcCmd::Dump { start, end } => {
+            let (a, b) = (parse_addr(start)?, parse_addr(end)?);
+            if a > b || b > 0xFFF {
+                return Err("range must satisfy start <= end <= 0xFFF".into());
+            }
+            let mut ec = open_ec(cli)?;
+            for addr in a..=b {
+                println!("{addr} 0x{:02x}", ec.read(addr)?);
+            }
             Ok(())
         }
         EcCmd::Write { addr, value, force } => {

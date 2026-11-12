@@ -1,8 +1,7 @@
 //! `rcc` — Ripple Control Center CLI.
 //!
-//! Read-only commands work against the mock backend and the OEM file
-//! formats (UserFanTables, RGBKeyboard.reg); the real backends (acpi_call /
-//! WMI / sysfs) are selected with `--backend`.
+//! Talks to real hardware only (acpi_call / WMI / kernel sysfs) and reads the
+//! OEM file formats (UserFanTables, RGBKeyboard.reg). Needs root.
 //!
 //! Enumerated arguments use clap `ValueEnum`, so every `--help` shows the
 //! legal values (`[possible values: …]`) instead of failing at runtime.
@@ -20,7 +19,7 @@ use clap::{Parser, Subcommand, ValueEnum};
                   RGB, battery protection, monitoring, display) as a Rust CLI."
 )]
 struct Cli {
-    /// Backend (auto = try real hw, fall back to mock)
+    /// EC backend (auto = acpi_call, then wmi)
     #[arg(long, global = true, value_enum, default_value_t = Backend::Auto)]
     backend: Backend,
 
@@ -34,10 +33,8 @@ struct Cli {
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum Backend {
-    /// Try acpi → wmi → sysfs, fall back to the mock image
+    /// Try acpi → wmi
     Auto,
-    /// In-memory sample EC (development)
-    Mock,
     /// ECRR/ECRW via /proc/acpi/call (needs sudo)
     Acpi,
     /// WMBC GetSetULong via /proc/acpi/call (needs sudo)
@@ -64,17 +61,20 @@ pub enum Command {
     Doctor,
     /// Show current mode, fans, temps, battery, RGB summary
     Status,
-    /// Live sensor table (uniwill hwmon, falls back to EC/mock)
+    /// Live sensor table (uniwill hwmon, falls back to EC)
     Monitor {
         /// Refresh interval in seconds
         #[arg(long, default_value_t = 1.0)]
         interval: f64,
     },
-    /// Performance mode (Office/Gaming/Turbo/Benchmark)
+    /// Performance profile (Office/Gaming/Turbo): show, set, cycle
     Mode {
         #[command(subcommand)]
         cmd: ModeCmd,
     },
+    /// Follow the hardware mode button: each press cycles Office → Gaming → Turbo and
+    /// applies it (what the stock Windows service does). Runs until stopped.
+    Watch,
     /// Fan control: curves, boost, levels
     Fan {
         #[command(subcommand)]
@@ -90,7 +90,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: RgbCmd,
     },
-    /// Battery protection / charge limit
+    /// Battery charge profile (charge limits are a TODO)
     Battery {
         #[command(subcommand)]
         cmd: BatteryCmd,
@@ -121,6 +121,9 @@ pub enum Command {
 pub enum EcCmd {
     /// Read one EC byte: `rcc ec read 1873` or `rcc ec read 0x751`
     Read { addr: String },
+    /// Dump an inclusive EC range as `addr value` lines, for diffing two hardware states
+    /// (e.g. `rcc ec dump 0 4095 > a.txt`, change something, dump again, `diff a.txt b.txt`)
+    Dump { start: String, end: String },
     /// Write one EC byte (prints old → new + readback verify)
     Write {
         addr: String,
@@ -140,18 +143,30 @@ pub enum ModeCmd {
         #[arg(value_enum)]
         mode: ModeChoice,
     },
+    /// Switch to the next mode, like one press of the hardware button
+    Next,
+    /// Save your Custom preset (the stock ones are read-only): `rcc mode custom 45 50 --ctgp 5`
+    Custom {
+        /// PL1 in watts
+        pl1: u8,
+        /// PL2 in watts
+        pl2: u8,
+        /// GPU cTGP offset in watts
+        #[arg(long, default_value_t = 0)]
+        ctgp: u8,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum ModeChoice {
-    /// Silent/low power (PL defaults + fan profile)
+    /// 0 lights: lowest power (EC default PL, 35 W here)
     Office,
-    /// Balanced gaming profile
+    /// 1 light: gaming (EC default PL, 55 W here)
     Gaming,
-    /// Max sustained performance
+    /// 2 lights: Overboost (80 W + GPU cTGP +20 W, the stock app's values for this machine)
     Turbo,
-    /// Short-burst benchmark profile
-    Benchmark,
+    /// Your own preset (see `rcc mode custom`); not reachable with the hardware button
+    Custom,
 }
 
 #[derive(Subcommand)]
@@ -166,7 +181,7 @@ pub enum FanCmd {
         #[arg(value_enum)]
         state: OnOff,
     },
-    /// Manual fan level 0..=5 (0 = auto/normal)
+    /// Manual fan level (disabled: this EC's user-level tables are empty, see `fan level`)
     Level {
         /// 0=normal, 1..=5 user levels (0x81..0x85)
         level: u8,
@@ -192,11 +207,11 @@ pub enum CurveCmd {
 
 #[derive(Subcommand)]
 pub enum PowerCmd {
-    /// Show current PL1/PL2/TCC (EC read or mock)
+    /// Show current PL1/PL2/TCC (EC read)
     Get,
-    /// Set PL1 in watts (5..=150)
+    /// Set PL1 in watts (5..=80, the stock Turbo value for this machine)
     Pl1 { watts: u16 },
-    /// Set PL2 in watts (5..=150)
+    /// Set PL2 in watts (5..=80)
     Pl2 { watts: u16 },
     /// Set TCC offset in °C (-30..=0)
     Tcc { offset: i8 },
@@ -208,8 +223,10 @@ pub enum RgbCmd {
     State,
     /// Show effects list (ids as used by the EC/HID protocol)
     Effects,
-    /// Keyboard color: 6 hex digits (`ff8800`) or `off`
+    /// Keyboard backlight colour: 6 hex digits (`ff8800`) or `off` (EC registers 1897-1899)
     Color { color: String },
+    /// Keyboard backlight brightness 0..=100 (percent of the chosen colour)
+    Brightness { percent: u8 },
     /// Lightbar color: 6 hex digits, `off`, or `on` (restores full white)
     ///
     /// Uses the kernel LED class (`uniwill:multicolor:status`).
@@ -218,10 +235,11 @@ pub enum RgbCmd {
 
 #[derive(Subcommand)]
 pub enum BatteryCmd {
-    /// Show charge limits, charge profile, battery health/status
+    /// Show the current charge profile
     Get,
-    /// Set charge limit 0..=100 (EC registers; kernel threshold attr if present)
-    ChargeLimit { percent: u8 },
+    // TODO(charge-limit): parked for now, see commands.rs `battery`.
+    // /// Set charge limit 0..=100 (EC registers; kernel threshold attr if present)
+    // ChargeLimit { percent: u8 },
     /// Set protection/charge profile
     ///
     /// OEM names map onto the kernel `charge_types` interface:
@@ -279,6 +297,10 @@ pub enum SystemCmd {
 
 fn main() {
     let cli = Cli::parse();
+    if let Err(e) = ripple_hw::require_root(false) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
     if let Err(e) = commands::run(&cli) {
         eprintln!("error: {e}");
         std::process::exit(1);
