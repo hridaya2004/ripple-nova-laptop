@@ -16,3 +16,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 [profile.dev]
 debug = 1
+
+# gpui -> zed-async-tar -> xattr 0.2.3 doesn't compile against current libc (no ENOATTR on Linux).
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
