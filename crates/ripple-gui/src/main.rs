@@ -5,6 +5,7 @@
 //! hardware I/O runs on GPUI's background executor behind one mutex, so the render path
 //! never blocks.
 
+mod autostart;
 mod hw;
 mod settings;
 
@@ -81,14 +82,17 @@ impl Palette {
     }
 }
 
-/// `rcc-gui [--tab profiles|fan|keyboard|system|settings] [--open] [--light]`: where to start
-/// (handy for screenshots; `--light` forces the light theme for this run).
+/// `rcc-gui [--tab profiles|fan|keyboard|system|settings] [--open] [--light] [--size WxH] [--minimized]`:
+/// where to start (handy for screenshots; `--light` forces the light theme for this run).
+/// `rcc-gui --autostart on|off|status` installs/removes/shows the start-at-login entry and exits.
 struct Start {
     tab: Tab,
     open: bool,
     light: bool,
     /// `--size 860x1000`: window size for this run (screenshots of whole tabs)
     size: Option<(f32, f32)>,
+    /// `--minimized`: start minimized (what the autostart entry uses)
+    minimized: bool,
 }
 
 impl Start {
@@ -105,7 +109,7 @@ impl Start {
             let (w, h) = v.split_once('x')?;
             Some((w.parse().ok()?, h.parse().ok()?))
         });
-        Self { tab, open: args.iter().any(|a| a == "--open"), light: args.iter().any(|a| a == "--light"), size }
+        Self { tab, open: args.iter().any(|a| a == "--open"), light: args.iter().any(|a| a == "--light"), size, minimized: args.iter().any(|a| a == "--minimized") }
     }
 }
 
@@ -129,6 +133,8 @@ struct Ui {
     fonts: Vec<String>,
     dropdown_open: bool,
     font_open: bool,
+    /// Is the start-at-login entry installed?
+    autostart: bool,
     /// Profile under the mouse in the dropdown, shown in the "what changes" panel.
     preview: Option<Profile>,
 }
@@ -160,6 +166,7 @@ impl Ui {
             system_font: settings::system_mono().into(),
             dropdown_open: start.open && start.tab == Tab::Profiles,
             font_open: start.open && start.tab == Tab::Settings,
+            autostart: autostart::Layout::system().is_enabled(),
             preview: None,
         }
     }
@@ -191,6 +198,21 @@ impl Ui {
             .ok();
         })
         .detach();
+    }
+
+    /// Switch the start-at-login entry; the result (or error) goes to the status bar.
+    fn toggle_autostart(&mut self, cx: &mut Context<Self>) {
+        let layout = autostart::Layout::system();
+        let res = if layout.is_enabled() {
+            layout.disable().map(|()| "start at login: off".to_string())
+        } else {
+            std::env::current_exe()
+                .and_then(|exe| layout.enable(&exe))
+                .map(|()| format!("start at login: on (installed {})", layout.dir.display()))
+        };
+        self.hw.lock().unwrap_or_else(|e| e.into_inner()).event = res.unwrap_or_else(|e| format!("error: start at login: {e}"));
+        self.autostart = layout.is_enabled();
+        cx.notify();
     }
 
     /// Persist UI preferences; failures show up in the status bar.
@@ -579,7 +601,7 @@ impl Ui {
                     .child(change(p, "CPU sustained power (PL1)", s.pl.map(|v| v.0), pr.pl1, ""))
                     .child(change(p, "CPU boost power (PL2)", s.pl.map(|v| v.1), pr.pl2, ""))
                     .child(change(p, "GPU configurable TGP (cTGP)", s.ctgp, pr.ctgp, "+"))
-                    .child(row(p, "Fans", "unchanged (see Fan tab)"));
+                    .child(row(p, "Fan profile", "follows the mode (EC mode byte); boost is separate"));
                 if m == Profile::Stock(OperatingMode::Turbo) {
                     changes = changes.child(note(p, "Turbo values are the stock app's for this machine (80 W, cTGP +20 W). It runs hot: expect throttling near 100 °C under all-core load. The GPU part only takes effect with the NVIDIA proprietary driver (this system uses nouveau)."));
                 }
@@ -630,7 +652,7 @@ impl Ui {
         }
         page.child(section(p, "Profile").child(self.profile_dropdown(cx)).child(note(
             p,
-            "The hardware mode button cycles Office → Gaming → Turbo while this app (or `rcc watch`) is running. The indicator lights next to the button do not follow yet: the EC register that drives them is not known.",
+            "The hardware mode button cycles Office → Gaming → Turbo while this app (or `rcc watch`) is running, and its lights follow the profile: 0 lights Office, 1 Gaming, 2 Turbo (Custom shows as 1).",
         )))
         .child(changes)
         .child(custom)
@@ -974,7 +996,15 @@ impl Ui {
             ))
             .child(note(p, format!("{} families available. Default: the system monospace font. Saved in /etc/ripple-nova/gui.json.", self.fonts.len())));
 
-        div().flex().flex_col().gap_3().child(theme).child(font).into_any_element()
+        let startup = section(p, "Start at login")
+            .child(
+                div().flex().items_center().gap_3()
+                    .child(button(p, "autostart", if self.autostart { "On" } else { "Off" }, self.autostart).on_click(cx.listener(|ui, _, _, cx| ui.toggle_autostart(cx))))
+                    .child("Start Ripple Control Center when I log in"),
+            )
+            .child(note(p, "Starts the app minimized so the mode button is followed and the mode lights match the profile after every boot. No systemd service: it is an autostart entry (/etc/xdg/autostart/ripple-nova.desktop). The app needs root, so you will get a polkit password prompt at each login. It runs a root-owned copy installed in /usr/local/lib/ripple-nova (so an unprivileged process cannot swap it); switch the option off and on after rebuilding to refresh that copy."));
+
+        div().flex().flex_col().gap_3().child(theme).child(font).child(startup).into_any_element()
     }
 }
 
@@ -1035,9 +1065,31 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(cmd) = args.iter().position(|a| a == "--autostart").and_then(|i| args.get(i + 1)) {
+        let layout = autostart::Layout::system();
+        let res = match cmd.as_str() {
+            "on" => std::env::current_exe().and_then(|exe| layout.enable(&exe)),
+            "off" => layout.disable(),
+            "status" => Ok(()),
+            other => {
+                eprintln!("error: --autostart takes on|off|status, got '{other}'");
+                std::process::exit(2);
+            }
+        };
+        match res {
+            Ok(()) => println!("start at login: {}", if layout.is_enabled() { "on" } else { "off" }),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let hw = Arc::new(Mutex::new(Hw::open()));
     spawn_mode_button(hw.clone());
     let start = Start::from_args();
+    let minimized = start.minimized;
     Application::new().run(move |cx: &mut App| {
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -1060,7 +1112,12 @@ fn main() {
                 app_id: Some("ripple-nova".into()),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Ui::new(hw, start, cx)),
+            move |window, cx| {
+                if minimized {
+                    window.minimize_window();
+                }
+                cx.new(|cx| Ui::new(hw, start, cx))
+            },
         )
         .unwrap();
         cx.activate(true);

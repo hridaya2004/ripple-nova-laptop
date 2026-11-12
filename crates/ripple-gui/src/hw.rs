@@ -108,12 +108,19 @@ impl Hw {
         };
         let model = linux::detect_model(ec.as_deref_mut()).to_string();
         let stock = control::stock(ec.as_deref_mut());
+        let cfg = Config::load();
+        // bring the button's mode lights in line with the limits already in force
+        if let Some(ec) = ec.as_deref_mut() {
+            if let Ok(Some(p)) = control::current(ec, &stock, &cfg.custom) {
+                let _ = control::set_mode_byte(ec, p);
+            }
+        }
         Self {
             ec,
             ec_error,
             sysfs: SysfsEc::probe().ok(),
             stock,
-            cfg: Config::load(),
+            cfg,
             model,
             ours: false,
             button: false,
@@ -218,7 +225,10 @@ impl Hw {
     pub fn set_profile(&mut self, p: Profile) -> Result<String, String> {
         let pr = self.preset(p);
         let sysfs = self.sysfs.take();
-        let r = self.ec().and_then(|ec| control::apply(ec, sysfs.as_ref(), pr).map_err(|e| e.to_string()));
+        let r = self.ec().and_then(|ec| {
+            control::apply(ec, sysfs.as_ref(), pr).map_err(|e| e.to_string())?;
+            control::set_mode_byte(ec, p).map_err(|e| e.to_string()) // mode lights + fan profile
+        });
         self.sysfs = sysfs;
         r?;
         Ok(format!("{}: PL1 {} W / PL2 {} W / GPU cTGP +{} W", p.name().to_lowercase(), pr.pl1, pr.pl2, pr.ctgp))
