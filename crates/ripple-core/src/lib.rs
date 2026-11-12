@@ -8,10 +8,12 @@
 //! * [`fan`] — fan curve model + `UserFanTables/*.json` parser
 //! * [`rgb`] — RGB keyboard/lightbar state model + `.reg` parser
 //! * [`modes`] — performance mode / power limit / battery enums
+//! * [`model`] — model detection (EC project id, DMI fallback)
 //!
 //! No hardware access lives here — that is `ripple-hw`'s job.
 
 pub mod fan;
+pub mod model;
 pub mod modes;
 pub mod protocol;
 pub mod regs;

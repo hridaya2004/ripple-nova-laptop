@@ -3,6 +3,7 @@ name = "ripple-core"
 description = "Shared domain types, EC register map, and OEM file-format parsers for ripple-nova"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

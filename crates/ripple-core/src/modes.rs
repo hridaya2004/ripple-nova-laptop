@@ -2,14 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The big mode switch (EC-backed; OEM `OperatingMode`).
+/// The big mode switch (OEM `OperatingMode`). The OEM enum also has Benchmark=3, but
+/// this hardware has no such mode (3 button lights: 0=Office, 1=Gaming, 2=Turbo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperatingMode {
     Office = 0,
     Gaming = 1,
     Turbo = 2,
-    Benchmark = 3,
 }
 
 impl OperatingMode {
@@ -18,7 +18,6 @@ impl OperatingMode {
             0 => Some(Self::Office),
             1 => Some(Self::Gaming),
             2 => Some(Self::Turbo),
-            3 => Some(Self::Benchmark),
             _ => None,
         }
     }
@@ -28,7 +27,15 @@ impl OperatingMode {
             Self::Office => "office",
             Self::Gaming => "gaming",
             Self::Turbo => "turbo",
-            Self::Benchmark => "benchmark",
+        }
+    }
+
+    /// What the hardware mode button does: Office → Gaming → Turbo → Office.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Office => Self::Gaming,
+            Self::Gaming => Self::Turbo,
+            Self::Turbo => Self::Office,
         }
     }
 }
@@ -40,7 +47,6 @@ impl std::str::FromStr for OperatingMode {
             "office" | "0" => Ok(Self::Office),
             "gaming" | "1" => Ok(Self::Gaming),
             "turbo" | "2" => Ok(Self::Turbo),
-            "benchmark" | "3" => Ok(Self::Benchmark),
             other => Err(format!("unknown mode '{other}'")),
         }
     }
@@ -131,12 +137,12 @@ mod tests {
             OperatingMode::Office,
             OperatingMode::Gaming,
             OperatingMode::Turbo,
-            OperatingMode::Benchmark,
         ] {
             let s = m.as_str();
             assert_eq!(s.parse::<OperatingMode>().unwrap(), m);
         }
         assert_eq!(OperatingMode::from_u8(1), Some(OperatingMode::Gaming));
+        assert_eq!(OperatingMode::from_u8(3), None, "no Benchmark mode on this hardware");
         assert_eq!(OperatingMode::from_u8(9), None);
     }
 

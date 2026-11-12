@@ -127,7 +127,7 @@ pub fn list_profiles(dir: impl AsRef<Path>) -> Result<Vec<String>> {
 
 /// Detect the model directory name from a DMI product name, e.g.
 /// `"PH4ARXX"` → `"PH4ARxx"` (matches `UserFanTables/` casing).
-pub fn model_dir_for(product_name: &str) -> Option<String> {
+pub fn model_dir_for(product_name: &str) -> Option<&'static str> {
     const MODELS: &[&str] = &[
         "PH4AQxx", "PH4ARxx", "PH4AUxf", "PH4AUxx", "PH4AXxx", "PH4TQx1",
         "PH4TRX1", "PH4TUX1", "PH6AQxx", "PH6ARxx", "PH6TRX1", "PH6AGxx",
@@ -137,7 +137,7 @@ pub fn model_dir_for(product_name: &str) -> Option<String> {
     MODELS
         .iter()
         .find(|m| upper.contains(&m.to_ascii_uppercase()))
-        .map(|m| m.to_string())
+        .copied()
 }
 
 #[cfg(test)]
@@ -182,8 +182,8 @@ mod tests {
 
     #[test]
     fn model_detect() {
-        assert_eq!(model_dir_for("PH4ARXX").as_deref(), Some("PH4ARxx"));
-        assert_eq!(model_dir_for("XMG Neo 16 PH6AQxx").as_deref(), Some("PH6AQxx"));
+        assert_eq!(model_dir_for("PH4ARXX"), Some("PH4ARxx"));
+        assert_eq!(model_dir_for("XMG Neo 16 PH6AQxx"), Some("PH6AQxx"));
         assert_eq!(model_dir_for("ThinkPad X1"), None);
     }
 

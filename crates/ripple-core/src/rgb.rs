@@ -275,12 +275,12 @@ impl RgbRegState {
 fn decode_reg(raw: &[u8]) -> Result<String> {
     if raw.starts_with(&[0xFF, 0xFE]) {
         Ok(String::from_utf16_lossy(
-            raw[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>().as_slice(),
+            raw[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>().as_slice(),
         ))
     } else if raw.len() >= 2 && raw[1] == 0 {
         // UTF-16LE without BOM
         Ok(String::from_utf16_lossy(
-            raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>().as_slice(),
+            raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>().as_slice(),
         ))
     } else {
         Ok(String::from_utf8_lossy(raw).into_owned())
