@@ -1,0 +1,18 @@
+[package]
+name = "ripple-gui"
+description = "`rcc-gui` — Ripple Control Center GPUI app (root only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rcc-gui"
+path = "src/main.rs"
+
+[dependencies]
+ripple-core = { path = "../ripple-core" }
+ripple-hw = { path = "../ripple-hw" }
+gpui = "=0.2.2"
+serde = { workspace = true }
+serde_json = { workspace = true }
