@@ -15,6 +15,7 @@ pub mod fan;
 pub mod modes;
 pub mod protocol;
 pub mod regs;
+pub mod rgb;
 
 pub use modes::{OperatingMode, ProtectionStatus};
 
