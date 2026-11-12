@@ -6,6 +6,8 @@
 //! * `AcpiCallEc` / `WmiEc` — Linux backends (behind the `linux` module).
 
 pub mod mock;
+#[cfg(target_os = "linux")]
+pub mod linux;
 
 pub use mock::MockEc;
 
