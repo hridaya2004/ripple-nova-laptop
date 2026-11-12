@@ -101,56 +101,136 @@ fn model_dir(cli: &Cli, explicit: Option<String>) -> Result<PathBuf, String> {
 fn doctor(cli: &Cli) -> CmdResult {
     println!("ripple-nova / rcc doctor\n");
 
+    let kernel_rel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+    let kernel_ver = parse_version(&kernel_rel);
+
     println!("system:");
-    println!(
-        "  kernel      : {}",
-        std::fs::read_to_string("/proc/version")
-            .map(|s| s.split_whitespace().nth(2).unwrap_or("?").to_string())
-            .unwrap_or_else(|_| "unknown".into())
-    );
+    println!("  kernel      : {kernel_rel}");
+    if let Some((id, pretty)) = os_release() {
+        println!("  distro      : {pretty} ({id})");
+    }
     match dmi_product() {
         Some(p) => println!("  dmi product : {p}"),
         None => println!("  dmi product : (unreadable)"),
     }
-    if let Some(s) = std::fs::read_to_string("/sys/class/dmi/id/sys_vendor").ok() {
+    if let Ok(s) = std::fs::read_to_string("/sys/class/dmi/id/sys_vendor") {
         println!("  dmi vendor  : {}", s.trim());
     }
 
+    let acpi_missing = || {
+        if std::path::Path::new("/proc/acpi/call").exists() {
+            "/proc/acpi/call exists but is not usable".to_string()
+        } else {
+            "/proc/acpi/call not present (acpi_call module not loaded)".to_string()
+        }
+    };
+    let acpi_res = ripple_hw::linux::AcpiCallEc::probe()
+        .map(|_| "available".to_string())
+        .map_err(|e| {
+            if std::path::Path::new("/proc/acpi/call").exists() {
+                e.to_string()
+            } else {
+                acpi_missing()
+            }
+        });
+    let wmi_res = ripple_hw::linux::WmiEc::probe()
+        .map(|_| "available".to_string())
+        .map_err(|_| acpi_missing());
+    let sysfs_res = ripple_hw::linux::SysfsEc::probe()
+        .map(|ec| format!("available ({})", ec.hwmon_dir().display()))
+        .map_err(|_| "uniwill-laptop hwmon not found".to_string());
+    let hid_res = probe_hid();
+
     println!("\nbackends:");
-    let probes: [(&str, Result<String, String>); 4] = [
-        (
-            "acpi_call (ECRR/ECRW)",
-            ripple_hw::linux::AcpiCallEc::probe()
-                .map(|_| "available".into())
-                .map_err(err),
-        ),
-        (
-            "wmi GetSetULong (WMBC)",
-            ripple_hw::linux::WmiEc::probe()
-                .map(|_| "available".into())
-                .map_err(err),
-        ),
-        (
-            "sysfs uniwill (>=6.19)",
-            ripple_hw::linux::SysfsEc::probe()
-                .map(|ec| format!("available ({})", ec.hwmon_dir().display()))
-                .map_err(err),
-        ),
-        (
-            "hidraw RGB keyboard",
-            probe_hid(),
-        ),
-    ];
-    for (name, res) in probes {
+    for (name, res) in [
+        ("acpi_call (ECRR/ECRW)", &acpi_res),
+        ("wmi GetSetULong (WMBC)", &wmi_res),
+        ("sysfs uniwill (>=6.19)", &sysfs_res),
+        ("hidraw RGB keyboard", &hid_res),
+    ] {
         match res {
             Ok(v) => println!("  {name:28}: {v}"),
             Err(e) => println!("  {name:28}: no — {e}"),
         }
     }
 
-    println!("\nEC:");
+    // Actionable fix block: concrete install/load commands + URLs.
+    let mut fixes: Vec<String> = Vec::new();
+    if acpi_res.is_err() {
+        fixes.push("acpi_call kernel module (backs BOTH the acpi_call and WMI EC paths):".into());
+        match module_path("acpi_call") {
+            Some(p) => fixes.push(format!("  already installed ({p}) → run: sudo modprobe acpi_call")),
+            None => {
+                match distro_family().as_deref() {
+                    Some("arch") => fixes.push("  install:  sudo pacman -S acpi_call        # Arch (extra repo)".into()),
+                    Some("debian") => fixes.push("  install:  sudo apt install acpi-call-dkms # Debian/Ubuntu".into()),
+                    _ => fixes.push(
+                        "  install:  git clone https://github.com/mkottman/acpi_call && cd acpi_call && make".into(),
+                    ),
+                }
+                fixes.push("  load:     sudo modprobe acpi_call          # creates /proc/acpi/call".into());
+            }
+        }
+        fixes.push("  source:   https://github.com/mkottman/acpi_call".into());
+        fixes.push(String::new());
+    }
+    if sysfs_res.is_err() {
+        fixes.push("uniwill-laptop kernel driver (hwmon temps/fans, charge limit, lightbar, hotkeys):".into());
+        if module_loaded("uniwill-laptop") {
+            fixes.push("  loaded, but no hwmon device → DMI whitelist may not cover this machine:".into());
+            fixes.push("  try:     sudo modprobe uniwill-laptop force=1    # testing only".into());
+        } else if let Some(p) = module_path("uniwill-laptop") {
+            fixes.push(format!("  present ({p}) → run: sudo modprobe uniwill-laptop"));
+            fixes.push("  no hwmon after load? → sudo modprobe uniwill-laptop force=1 (DMI whitelist)".into());
+        } else if kernel_ver.is_some_and(|v| v < (6, 19)) {
+            fixes.push(format!(
+                "  kernel {kernel_rel} < 6.19 → driver is mainline since 6.19; upgrade the kernel"
+            ));
+            fixes.push("  or build out-of-tree: https://github.com/Wer-Wolf/uniwill-laptop".into());
+        } else {
+            fixes.push("  module missing on a ≥6.19 kernel → CONFIG_X86_PLATFORM_DRIVERS_UNIWILL not set?".into());
+            fixes.push("  check:   grep UNIWILL /boot/config-$(uname -r)   # or: zgrep UNIWILL /proc/config.gz".into());
+        }
+        fixes.push("  docs:    https://docs.kernel.org/admin-guide/laptops/uniwill-laptop.html".into());
+        fixes.push(String::new());
+    }
+    if let Err(e) = &hid_res {
+        fixes.push("RGB keyboard — ITE HID solution (only if this machine has one):".into());
+        fixes.push(format!("  {e}"));
+        if hidraw_present() {
+            fixes.push(
+                "  /dev/hidraw* exists but no 048D device → likely the EC RGB solution (registers 1897-1902); no HID setup needed".into(),
+            );
+        } else {
+            fixes.push(
+                "  no /dev/hidraw* → likely the EC RGB solution (registers 1897-1902); no HID setup needed".into(),
+            );
+        }
+        fixes.push(
+            "  ITE protocol: https://github.com/rodgomesc/avell-unofficial-control-center".into(),
+        );
+        fixes.push(String::new());
+    }
+    let had_fixes = !fixes.is_empty();
+    if had_fixes {
+        println!("\nfix:");
+        for line in fixes {
+            println!("{line}");
+        }
+    }
+
+    if had_fixes {
+        println!("EC:");
+    } else {
+        println!("\nEC:");
+    }
     let mut ec = open_ec(cli)?;
     println!("  backend     : {}", ec.name());
+    if ec.name() == "mock" {
+        println!("  (no real EC backend active — see the fix block above)");
+    }
     if let Ok(pid) = ec.read(addr::PROJECT_ID) {
         let hi = ec.read(addr::PROJECT_ID + 1).unwrap_or(0);
         let id = (hi as u16) << 8 | pid as u16;
@@ -182,30 +262,122 @@ fn doctor(cli: &Cli) -> CmdResult {
     }
 
     println!("\nRGB solution:");
-    match probe_hid() {
-        Ok(v) => println!("  {v}"),
-        Err(_) => println!("  no ITE HID device found → EC-solution RGB (registers 1897-1902) likely"),
+    match &hid_res {
+        Ok(v) => println!("  {v} → hidraw backend (not implemented yet)"),
+        Err(e) => println!("  {e} → EC-solution RGB likely (registers 1897-1902)"),
     }
 
     Ok(())
 }
 
+/// Sysfs HID device dirs look like `0003:048D:8291.0003`
+/// (bus:vendor:product.instance, optionally `hid:`-prefixed).
 fn probe_hid() -> Result<String, String> {
-    // Look for the ITE keyboard controller (048D:xxxx) in sysfs.
-    let hid = PathBuf::from("/sys/bus/hid/devices");
-    if let Ok(rd) = std::fs::read_dir(&hid) {
+    let mut total = 0usize;
+    let mut found: Option<String> = None;
+    if let Ok(rd) = std::fs::read_dir("/sys/bus/hid/devices") {
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            // hid:0003:048D:XXXX.YYYY
-            if let Some(rest) = name.split("hid:").nth(1) {
-                let id = rest.split('.').next().unwrap_or("");
-                if id.to_ascii_uppercase().starts_with("0003:048D") {
-                    return Ok(format!("ITE HID device present: {name}"));
-                }
+            total += 1;
+            let id = name.rsplit("hid:").next().unwrap_or("");
+            let core = id.split('.').next().unwrap_or("");
+            let mut parts = core.split(':');
+            let _bus = parts.next();
+            let vendor = parts.next().unwrap_or("");
+            if vendor.eq_ignore_ascii_case("048D") {
+                found = Some(name);
+                break;
             }
         }
     }
-    Err("no ITE (048D) HID device".into())
+    match found {
+        Some(n) => Ok(format!("ITE (048D) controller present: {n}")),
+        None if total > 0 => Err(format!("no ITE (048D) device among {total} HID device(s)")),
+        None => Err("no HID devices found".into()),
+    }
+}
+
+/// `"7.2.15-arch1-1"` → `Some((7, 2))`.
+fn parse_version(s: &str) -> Option<(u32, u32)> {
+    let mut it = s.split(|c: char| !c.is_ascii_digit());
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Read `/etc/os-release` → `(ID, PRETTY_NAME)`.
+fn os_release() -> Option<(String, String)> {
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    let mut id = String::new();
+    let mut pretty = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("ID=") {
+            id = v.trim_matches('"').to_string();
+        }
+        if let Some(v) = line.strip_prefix("PRETTY_NAME=") {
+            pretty = v.trim_matches('"').to_string();
+        }
+    }
+    (!id.is_empty()).then_some((id, pretty))
+}
+
+/// Map the distro to a package-manager family for install hints.
+fn distro_family() -> Option<String> {
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    let mut id = String::new();
+    let mut like = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("ID=") {
+            id = v.trim_matches('"').to_string();
+        }
+        if let Some(v) = line.strip_prefix("ID_LIKE=") {
+            like = v.trim_matches('"').to_string();
+        }
+    }
+    let all = format!("{id} {like}").to_lowercase();
+    let toks: Vec<&str> = all.split_whitespace().collect();
+    if toks.iter().any(|t| matches!(*t, "arch" | "archlinux" | "manjaro" | "endeavouros" | "cachyos")) {
+        return Some("arch".into());
+    }
+    if toks.iter().any(|t| {
+        matches!(*t, "debian" | "ubuntu" | "linuxmint" | "pop" | "raspbian" | "elementary")
+    }) {
+        return Some("debian".into());
+    }
+    Some(id)
+}
+
+/// `modinfo -n <name>` → module file path (works for builtin modules too).
+fn module_path(name: &str) -> Option<String> {
+    let out = std::process::Command::new("modinfo").arg("-n").arg(name).output().ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Whether a module is currently loaded (checks `/sys/module`, dash/underscore agnostic).
+fn module_loaded(name: &str) -> bool {
+    let target = name.replace('-', "_");
+    std::fs::read_dir("/sys/module")
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                e.file_name().to_string_lossy().replace('-', "_") == target
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn hidraw_present() -> bool {
+    std::fs::read_dir("/dev")
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("hidraw"))
+        })
+        .unwrap_or(false)
 }
 
 fn status(cli: &Cli) -> CmdResult {
