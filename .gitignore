@@ -1,0 +1,9 @@
+# Rust build output and the usual rustc leftovers
+/target
+**/*.rs.bk
+*.pdb
+
+# Proprietary OEM Control Center packages: reference material for reverse
+# engineering only, never committed
+ControlCenter_*/
+ControlCenter_*.zip
