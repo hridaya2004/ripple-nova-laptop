@@ -583,6 +583,7 @@ fn apply_profile(ec: &mut dyn EcAccess, cli: &Cli, stock: &[Preset; 3], cfg: &Co
     let pr = preset_of(stock, cfg, p);
     let sysfs = uniwill(cli).ok();
     control::apply(ec, sysfs.as_ref(), pr)?;
+    control::set_mode_byte(ec, p)?; // the button's mode lights (0/1/2) + the EC's fan profile
     println!("mode → {} (PL1 {} W, PL2 {} W, GPU cTGP +{} W)", p.name().to_lowercase(), pr.pl1, pr.pl2, pr.ctgp);
     if sysfs.is_none() && pr.ctgp > 0 {
         println!("note: uniwill kernel driver not available, GPU cTGP not applied");
@@ -633,6 +634,10 @@ fn watch(cli: &Cli) -> CmdResult {
     let stock = control::stock(Some(ec.as_mut()));
     let cfg = Config::load();
     let mut key = control::open_mode_key()?;
+    // bring the button's lights in line with the limits that are already in force
+    if let Some(p) = control::current(ec.as_mut(), &stock, &cfg.custom)? {
+        control::set_mode_byte(ec.as_mut(), p)?;
+    }
     println!("watching the mode button (Ctrl+C to stop)");
     loop {
         control::wait_mode_key(&mut key)?;

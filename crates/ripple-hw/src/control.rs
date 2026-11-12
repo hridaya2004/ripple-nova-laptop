@@ -67,12 +67,26 @@ impl Profile {
         }
     }
 
-    /// What one press of the hardware button does: stock profiles cycle, anything else
-    /// (Custom, or limits that match nothing) restarts the cycle at Office.
+    /// What one press of the hardware button does: Office → Gaming → Turbo → Office (0 → 1 → 2
+    /// lights). Custom shows as Gaming (1 light), so its next press is Turbo; limits that match
+    /// nothing restart the cycle at Office.
     pub fn after_button(current: Option<Self>) -> Self {
         match current {
             Some(Self::Stock(m)) => Self::Stock(m.next()),
-            _ => Self::Stock(OperatingMode::Office),
+            Some(Self::Custom) => Self::Stock(OperatingMode::Gaming.next()),
+            None => Self::Stock(OperatingMode::Office),
+        }
+    }
+
+    /// The mode nibble of the EC fan control byte (EC 1873, high nibble). It is what drives the
+    /// three mode lights on the button and, presumably, the EC's fan profile for the mode:
+    /// measured on this machine, writing 0xA_ lit 0 lights, 0x3_ lit 2, 0x0_ lit 1. Custom has no
+    /// light of its own and shows as Gaming.
+    pub fn mode_nibble(self) -> u8 {
+        match self {
+            Self::Stock(OperatingMode::Office) => 0xA,
+            Self::Stock(OperatingMode::Turbo) => 0x3,
+            Self::Stock(OperatingMode::Gaming) | Self::Custom => 0x0,
         }
     }
 }
@@ -278,6 +292,24 @@ pub fn kb_from_8bit((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     (f(r), f(g), f(b))
 }
 
+// ------------------------------------------------------------------ mode lights / fan mode
+
+/// Write the profile's mode nibble into EC 1873 (lights + fan profile). While fan boost is on the
+/// nibble belongs to the boost, so the new mode is stashed and takes effect when boost ends.
+pub fn set_mode_byte(ec: &mut dyn EcAccess, p: Profile) -> HwResult<()> {
+    let cur = ec.read(addr::MAFAN_CONTROL_BYTE)?;
+    let nib = p.mode_nibble();
+    if is_boosted(cur) {
+        std::fs::write(STASH_PATH, (nib << 4).to_string())?;
+        return Ok(());
+    }
+    let new = (cur & 0x0F) | (nib << 4);
+    if new != cur {
+        ec.write_verified(addr::MAFAN_CONTROL_BYTE, new)?;
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ fan boost
 
 /// New fan control byte for boost on/off. `stash` remembers the pre-boost mode so
@@ -420,10 +452,16 @@ mod tests {
     #[test]
     fn button_cycles_stock_profiles_and_restarts_from_anything_else() {
         use OperatingMode::*;
+        // the button's LEDs go 0 → 1 → 2: Office → Gaming → Turbo → Office
         assert_eq!(Profile::after_button(Some(Profile::Stock(Office))), Profile::Stock(Gaming));
+        assert_eq!(Profile::after_button(Some(Profile::Stock(Gaming))), Profile::Stock(Turbo));
         assert_eq!(Profile::after_button(Some(Profile::Stock(Turbo))), Profile::Stock(Office));
-        assert_eq!(Profile::after_button(Some(Profile::Custom)), Profile::Stock(Office));
+        assert_eq!(Profile::after_button(Some(Profile::Custom)), Profile::Stock(Turbo)); // shows as 1 light
         assert_eq!(Profile::after_button(None), Profile::Stock(Office));
+        // lights: measured 0xA_ = 0 lights, 0x0_ = 1 light, 0x3_ = 2 lights
+        assert_eq!(Profile::Stock(Office).mode_nibble(), 0xA);
+        assert_eq!(Profile::Stock(Gaming).mode_nibble(), 0x0);
+        assert_eq!(Profile::Stock(Turbo).mode_nibble(), 0x3);
     }
 
     #[test]

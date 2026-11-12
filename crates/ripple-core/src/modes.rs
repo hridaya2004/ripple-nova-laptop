@@ -30,7 +30,8 @@ impl OperatingMode {
         }
     }
 
-    /// What the hardware mode button does: Office → Gaming → Turbo → Office.
+    /// What the hardware mode button does: Office → Gaming → Turbo → Office, i.e. the button's
+    /// LEDs go 0 → 1 → 2 → 0 lights (as the user wants it).
     pub fn next(self) -> Self {
         match self {
             Self::Office => Self::Gaming,
