@@ -1,0 +1,9 @@
+#!/bin/sh
+# Opens the Ripple Control Center window with the root rights it needs (polkit password prompt).
+# pkexec starts with a clean environment, so the display variables are passed through.
+set --
+for v in WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XAUTHORITY; do
+	eval "val=\${$v}"
+	[ -n "$val" ] && set -- "$@" "$v=$val"
+done
+exec pkexec env "$@" @BINDIR@/rcc-gui

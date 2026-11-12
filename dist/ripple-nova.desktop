@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Ripple Control Center
+Comment=Power profiles, fans and keyboard backlight
+Exec=ripple-nova
+Icon=preferences-system
+Terminal=false
+Categories=Settings;HardwareSettings;

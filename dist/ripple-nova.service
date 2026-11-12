@@ -1,0 +1,19 @@
+[Unit]
+Description=Ripple Control Center: follow the mode button, keep profile and lights in sync
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+# Runs as root on purpose: it needs /proc/acpi/call, EC registers and sysfs writes.
+ExecStartPre=-/usr/bin/env modprobe acpi_call
+ExecStartPre=-/usr/bin/env modprobe uniwill-laptop
+ExecStart=@BINDIR@/rcc watch
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
