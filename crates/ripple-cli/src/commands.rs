@@ -3,12 +3,15 @@
 use std::path::PathBuf;
 
 use ripple_core::fan::{list_profiles, model_dir_for, FanTable};
-use ripple_core::modes::{FanControlByte, OperatingMode, ProtectionStatus};
+use ripple_core::modes::{FanControlByte, OperatingMode};
 use ripple_core::regs::{addr, duty_from_ec};
 use ripple_core::rgb::RgbRegState;
 use ripple_hw::{EcAccess, HwError};
 
-use crate::{BatteryCmd, Cli, CurveCmd, DisplayCmd, FanCmd, ModeCmd, PowerCmd, RgbCmd};
+use crate::{
+    Backend, BatteryCmd, Cli, CurveCmd, DisplayCmd, EcCmd, FanCmd, ModeChoice, ModeCmd, PowerCmd,
+    ProfileChoice, RgbCmd, SystemCmd,
+};
 
 pub type CmdResult = Result<(), String>;
 
@@ -23,22 +26,26 @@ pub fn run(cli: &Cli) -> CmdResult {
         crate::Command::Rgb { cmd } => rgb(cli, cmd),
         crate::Command::Battery { cmd } => battery(cli, cmd),
         crate::Command::Display { cmd } => display(cli, cmd),
+        crate::Command::System { cmd } => system(cli, cmd),
+        crate::Command::Ec { cmd } => ec_cmd(cli, cmd),
     }
 }
 
 // ---------------------------------------------------------------- backends
 
 fn open_ec(cli: &Cli) -> Result<Box<dyn EcAccess>, String> {
-    match cli.backend.as_str() {
-        "mock" => Ok(Box::new(ripple_hw::mock::samples::ph4())),
-        "acpi" => Ok(Box::new(
+    match cli.backend {
+        Backend::Mock => Ok(Box::new(ripple_hw::mock::samples::ph4())),
+        Backend::Acpi => Ok(Box::new(
             ripple_hw::linux::AcpiCallEc::probe().map_err(err)?,
         )),
-        "wmi" => Ok(Box::new(ripple_hw::linux::WmiEc::probe().map_err(err)?)),
-        "sysfs" => Ok(Box::new(
+        Backend::Wmi => Ok(Box::new(
+            ripple_hw::linux::WmiEc::probe().map_err(err)?,
+        )),
+        Backend::Sysfs => Ok(Box::new(
             ripple_hw::linux::SysfsEc::probe().map_err(err)?,
         )),
-        "auto" => {
+        Backend::Auto => {
             // Prefer real backends; fall back to mock for development.
             if let Ok(ec) = ripple_hw::linux::AcpiCallEc::probe() {
                 return Ok(Box::new(ec));
@@ -49,8 +56,16 @@ fn open_ec(cli: &Cli) -> Result<Box<dyn EcAccess>, String> {
             eprintln!("note: no EC backend available, using --mock image (see `rcc doctor`)");
             Ok(Box::new(ripple_hw::mock::samples::ph4()))
         }
-        other => Err(format!("unknown backend '{other}' (auto|mock|acpi|wmi|sysfs)")),
     }
+}
+
+/// The kernel `uniwill-laptop` sysfs interface (sensors/lightbar/charge/attrs).
+/// Independent of the EC backend; hidden entirely under `--backend mock`.
+fn uniwill(cli: &Cli) -> Result<ripple_hw::linux::SysfsEc, String> {
+    if matches!(cli.backend, Backend::Mock) {
+        return Err("sysfs hidden by --backend mock".into());
+    }
+    ripple_hw::linux::SysfsEc::probe().map_err(err)
 }
 
 fn err(e: HwError) -> String {
@@ -127,7 +142,7 @@ fn doctor(cli: &Cli) -> CmdResult {
         }
     };
     let acpi_res = ripple_hw::linux::AcpiCallEc::probe()
-        .map(|_| "available".to_string())
+        .map(|ec| format!("available ({}.ECRR/.ECRW)", ec.device()))
         .map_err(|e| {
             if std::path::Path::new("/proc/acpi/call").exists() {
                 e.to_string()
@@ -136,11 +151,17 @@ fn doctor(cli: &Cli) -> CmdResult {
             }
         });
     let wmi_res = ripple_hw::linux::WmiEc::probe()
-        .map(|_| "available".to_string())
-        .map_err(|_| acpi_missing());
+        .map(|ec| format!("available ({})", ec.wmbc()))
+        .map_err(|e| {
+            if std::path::Path::new("/proc/acpi/call").exists() {
+                e.to_string()
+            } else {
+                acpi_missing()
+            }
+        });
     let sysfs_res = ripple_hw::linux::SysfsEc::probe()
-        .map(|ec| format!("available ({})", ec.hwmon_dir().display()))
-        .map_err(|_| "uniwill-laptop hwmon not found".to_string());
+        .map(|ec| format!("available ({})", ec.summary()))
+        .map_err(err);
     let hid_res = probe_hid();
 
     println!("\nbackends:");
@@ -158,10 +179,22 @@ fn doctor(cli: &Cli) -> CmdResult {
 
     // Actionable fix block: concrete install/load commands + URLs.
     let mut fixes: Vec<String> = Vec::new();
-    if acpi_res.is_err() {
+    if let Err(e) = &acpi_res {
         fixes.push("acpi_call kernel module (backs BOTH the acpi_call and WMI EC paths):".into());
+        fixes.push(format!("  error: {e}"));
+        if e.contains("sudo") || e.contains("permission") {
+            fixes.push("  → run rcc with sudo (writing /proc/acpi/call requires root)".into());
+        } else if e.contains("ECRR") {
+            fixes.push("  → method discovery failed: no device on this DSDT answered to <path>.ECRR".into());
+            fixes.push("    (the paths actually tried are listed in the error above)".into());
+        }
         match module_path("acpi_call") {
-            Some(p) => fixes.push(format!("  already installed ({p}) → run: sudo modprobe acpi_call")),
+            Some(p) if !std::path::Path::new("/proc/acpi/call").exists() => {
+                fixes.push(format!(
+                    "  installed ({p}) but not loaded → run: sudo modprobe acpi_call"
+                ));
+            }
+            Some(_) => {}
             None => {
                 match distro_family().as_deref() {
                     Some("arch") => fixes.push("  install:  sudo pacman -S acpi_call        # Arch (extra repo)".into()),
@@ -385,7 +418,7 @@ fn status(cli: &Cli) -> CmdResult {
 
     println!("mode:");
     if let Ok(b) = ec.read(addr::MAFAN_CONTROL_BYTE) {
-        println!("  fan control byte: {b:#04x}");
+        println!("  fan control byte: {b:#04x} ({})", fan_mode_name(b));
     }
     if let Ok(pl1) = ec.read(addr::PL1_SETTING) {
         println!("  PL1 setting     : {pl1} W");
@@ -394,17 +427,58 @@ fn status(cli: &Cli) -> CmdResult {
         println!("  PL2 setting     : {pl2} W");
     }
 
-    println!("fans:");
-    let l = ec.read(addr::MAIN_FAN_L_DUTY).unwrap_or(0);
-    let r = ec.read(addr::MAIN_FAN_R_DUTY).unwrap_or(0);
-    println!("  duty L/R        : {} % / {} %", duty_from_ec(l), duty_from_ec(r));
-    let rpm1 = read_u16(&mut ec, addr::MAIN_FAN_RPM1, addr::MAIN_FAN_RPM2);
-    let rpm2 = read_u16(&mut ec, addr::SECOND_FAN_RPM1, addr::SECOND_FAN_RPM2);
-    println!("  rpm main/second : {rpm1} / {rpm2}");
+    // Sensors: kernel uniwill hwmon first (real hardware), EC fallback.
+    let sysfs = uniwill(cli).ok();
+    match sysfs.as_ref().and_then(|u| u.sensors().ok()) {
+        Some(s) => {
+            println!("sensors (uniwill hwmon):");
+            for (l, mv) in &s.temps {
+                println!("  temp {l:8}: {:5.1} °C", *mv as f64 / 1000.0);
+            }
+            for (i, (l, rpm)) in s.fans.iter().enumerate() {
+                let pwm = match s.pwms.get(i) {
+                    Some(p) => format!("pwm {p:>3} ({:2.0} %)", *p as f64 * 100.0 / 255.0),
+                    None => String::new(),
+                };
+                println!("  fan  {l:8}: {rpm:>5} rpm  {pwm}");
+            }
+        }
+        None => {
+            println!("fans (EC):");
+            let l = ec.read(addr::MAIN_FAN_L_DUTY).unwrap_or(0);
+            let r = ec.read(addr::MAIN_FAN_R_DUTY).unwrap_or(0);
+            println!(
+                "  duty L/R        : {} % / {} %",
+                duty_from_ec(l),
+                duty_from_ec(r)
+            );
+            let rpm1 = read_tach(&mut ec, addr::MAIN_FAN_RPM1, addr::MAIN_FAN_RPM2);
+            let rpm2 = read_tach(&mut ec, addr::SECOND_FAN_RPM1, addr::SECOND_FAN_RPM2);
+            println!("  rpm main/second : {rpm1} / {rpm2}");
+        }
+    }
 
     println!("battery:");
     if let Ok(up) = ec.read(addr::BATTERY_CHARGE_LIMIT_UP) {
         println!("  charge limit    : {up} %");
+    }
+    if let Some(u) = &sysfs {
+        if let Ok((sel, all)) = u.charge_types() {
+            println!("  charge profile  : {sel} (available: {})", all.join(", "));
+        }
+        if let Ok(bat) = std::fs::read_to_string("/sys/class/power_supply/BAT0/status") {
+            println!("  status          : {}", bat.trim());
+        }
+        if let Ok(h) = std::fs::read_to_string("/sys/class/power_supply/BAT0/health") {
+            println!("  health          : {}", h.trim());
+        }
+    }
+
+    if let Some(u) = &sysfs {
+        if let Ok((r, g, b, bri)) = u.lightbar() {
+            println!("lightbar:");
+            println!("  color           : #{r:02x}{g:02x}{b:02x}  brightness {bri}");
+        }
     }
 
     // Fan table summary (read-only, from OEM files)
@@ -444,27 +518,57 @@ fn status(cli: &Cli) -> CmdResult {
     Ok(())
 }
 
-fn read_u16(ec: &mut Box<dyn EcAccess>, lo: u16, hi: u16) -> u16 {
-    let a = ec.read(lo).unwrap_or(0) as u16;
-    let b = ec.read(hi).unwrap_or(0) as u16;
-    (b << 8) | a
+/// EC tach registers are big-endian as listed in the OEM map:
+/// main = (BYTE1@1124 << 8) | BYTE2@1125, second = (BYTE1@1132 << 8) | BYTE2@1131.
+/// Verified against hwmon: 0x07E2 = 2018 rpm = fan1_input (2026-11-12).
+fn read_tach(ec: &mut Box<dyn EcAccess>, hi_reg: u16, lo_reg: u16) -> u16 {
+    let hi = ec.read(hi_reg).unwrap_or(0) as u16;
+    let lo = ec.read(lo_reg).unwrap_or(0) as u16;
+    (hi << 8) | lo
 }
 
-fn monitor(_cli: &Cli, interval: f64) -> CmdResult {
-    let mut ec = open_ec(_cli)?;
-    println!(
-        "{:<8} {:>8} {:>8} {:>8}",
-        "t(s)", "dutyL%", "rpm1", "rpm2"
-    );
+fn monitor(cli: &Cli, interval: f64) -> CmdResult {
+    let sleep = std::time::Duration::from_secs_f64(interval.max(0.2));
+
+    // Preferred: kernel hwmon (real temps + fans, no sudo needed).
+    if let Ok(u) = uniwill(cli) {
+        println!(
+            "{:<8} {:>8} {:>8} {:>8} {:>8} {:>6}",
+            "t(s)", "cpu°C", "gpu°C", "rpm1", "rpm2", "pwm1"
+        );
+        let mut t = 0.0f64;
+        loop {
+            if let Ok(s) = u.sensors() {
+                let cpu = s.temps.first().map(|(_, v)| *v as f64 / 1000.0);
+                let gpu = s.temps.get(1).map(|(_, v)| *v as f64 / 1000.0);
+                let f1 = s.fans.first().map(|(_, v)| *v).unwrap_or(0);
+                let f2 = s.fans.get(1).map(|(_, v)| *v).unwrap_or(0);
+                let pwm = s.pwms.first().copied().unwrap_or(0);
+                println!(
+                    "{t:<8.1} {:>8} {:>8} {:>8} {:>8} {:>6}",
+                    cpu.map(|v| format!("{v:.1}")).unwrap_or_else(|| "-".into()),
+                    gpu.map(|v| format!("{v:.1}")).unwrap_or_else(|| "-".into()),
+                    f1,
+                    f2,
+                    pwm
+                );
+            }
+            std::thread::sleep(sleep);
+            t += interval;
+        }
+    }
+
+    // Fallback: EC registers (acpi/wmi/mock).
+    let mut ec = open_ec(cli)?;
+    println!("{:<8} {:>8} {:>8} {:>8}", "t(s)", "dutyL%", "rpm1", "rpm2");
     let mut t = 0.0f64;
     loop {
         let l = ec.read(addr::MAIN_FAN_L_DUTY).unwrap_or(0);
-        let rpm1 = read_u16(&mut ec, addr::MAIN_FAN_RPM1, addr::MAIN_FAN_RPM2);
-        let rpm2 = read_u16(&mut ec, addr::SECOND_FAN_RPM1, addr::SECOND_FAN_RPM2);
+        let rpm1 = read_tach(&mut ec, addr::MAIN_FAN_RPM1, addr::MAIN_FAN_RPM2);
+        let rpm2 = read_tach(&mut ec, addr::SECOND_FAN_RPM1, addr::SECOND_FAN_RPM2);
         println!("{t:<8.1} {:>8} {:>8} {:>8}", duty_from_ec(l), rpm1, rpm2);
-        std::thread::sleep(std::time::Duration::from_secs_f64(interval.max(0.2)));
+        std::thread::sleep(sleep);
         t += interval;
-        // the mock backend never changes; Ctrl-C to stop.
     }
 }
 
@@ -477,9 +581,12 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
             Ok(())
         }
         ModeCmd::Set { mode } => {
-            let m: OperatingMode = mode
-                .parse()
-                .map_err(|e: String| e)?;
+            let m: OperatingMode = match mode {
+                ModeChoice::Office => OperatingMode::Office,
+                ModeChoice::Gaming => OperatingMode::Gaming,
+                ModeChoice::Turbo => OperatingMode::Turbo,
+                ModeChoice::Benchmark => OperatingMode::Benchmark,
+            };
             let mut ec = open_ec(cli)?;
             // OEM writes the mode's default PL/TCC registers then flips the
             // active profile; the full sequence is not implemented yet.
@@ -553,10 +660,10 @@ fn fan(cli: &Cli, cmd: &FanCmd) -> CmdResult {
             }
         },
         FanCmd::Boost { state } => {
-            let flag = match state.to_ascii_lowercase().as_str() {
-                "on" | "true" | "1" => FanControlByte::FanBoost.to_byte(),
-                "off" | "false" | "0" => FanControlByte::Normal.to_byte(),
-                other => return Err(format!("boost must be on/off, got '{other}'")),
+            let flag = if state.as_bool() {
+                FanControlByte::FanBoost.to_byte()
+            } else {
+                FanControlByte::Normal.to_byte()
             };
             let mut ec = open_ec(cli)?;
             let cur = ec.read(addr::MAFAN_CONTROL_BYTE)?;
@@ -688,17 +795,43 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
                 println!("rgb off — write path is not implemented yet (EC 1897-1902 or ITE hidraw)");
                 return Ok(());
             }
-            let hex = color.trim_start_matches('#');
-            if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!("expected 6 hex digits or 'off', got '{color}'"));
+            let (r, g, b) = parse_hex_color(color)?;
+            println!("rgb color (R={r} G={g} B={b}) — keyboard write path is not implemented yet");
+            Ok(())
+        }
+        RgbCmd::Lightbar { color } => {
+            let u = uniwill(cli)?;
+            if color.eq_ignore_ascii_case("off") {
+                u.set_lightbar(None)?;
+                println!("lightbar off (brightness 0)");
+            } else {
+                let rgb = if color.eq_ignore_ascii_case("on") {
+                    (255, 255, 255)
+                } else {
+                    parse_hex_color(color)?
+                };
+                u.set_lightbar(Some(rgb))?;
+                let (r, g, b, bri) = u.lightbar()?;
+                println!("lightbar → #{r:02x}{g:02x}{b:02x} (brightness {bri})");
             }
-            let r = u8::from_str_radix(&hex[0..2], 16).unwrap();
-            let g = u8::from_str_radix(&hex[2..4], 16).unwrap();
-            let b = u8::from_str_radix(&hex[4..6], 16).unwrap();
-            println!("rgb color #{hex} (R={r} G={g} B={b}) — write path is not implemented yet");
             Ok(())
         }
     }
+}
+
+/// `ff8800` / `#ff8800` → (r, g, b) with a clap-friendly error message.
+fn parse_hex_color(color: &str) -> Result<(u8, u8, u8), String> {
+    let hex = color.trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "expected 6 hex digits (e.g. ff8800) or 'off', got '{color}'"
+        ));
+    }
+    Ok((
+        u8::from_str_radix(&hex[0..2], 16).unwrap(),
+        u8::from_str_radix(&hex[2..4], 16).unwrap(),
+        u8::from_str_radix(&hex[4..6], 16).unwrap(),
+    ))
 }
 
 fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
@@ -719,11 +852,18 @@ fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
             Ok(())
         }
         BatteryCmd::Profile { profile } => {
-            let p: ProtectionStatus = profile.parse().map_err(|e: String| e)?;
-            println!(
-                "battery protection profile → {} (EC write path is not implemented yet)",
-                p.as_str()
-            );
+            // OEM names map onto the kernel charge_types interface.
+            let want = match profile {
+                ProfileChoice::Performance | ProfileChoice::Standard => "Standard",
+                ProfileChoice::Balanced | ProfileChoice::Trickle => "Trickle",
+                ProfileChoice::Healthy | ProfileChoice::LongLife => "Long_Life",
+            };
+            let u = uniwill(cli).map_err(|e| {
+                format!("charge profiles need the uniwill kernel driver: {e}")
+            })?;
+            let (_sel, all) = u.charge_types()?;
+            u.set_charge_types(want)?;
+            println!("charge profile → {want} (available: {})", all.join(", "));
             Ok(())
         }
     }
@@ -744,11 +884,162 @@ fn display(_cli: &Cli, cmd: &DisplayCmd) -> CmdResult {
             Ok(())
         }
         DisplayCmd::Dgpu { state } => {
-            match state.to_ascii_lowercase().as_str() {
-                "on" | "off" => {}
-                other => return Err(format!("dgpu must be on/off, got '{other}'")),
+            // Deliberately NOT executed automatically — ACPI _OFF on dGPU is
+            // risky (needs a verified _OFF/_ON pair).
+            println!(
+                "dGPU power {} — ACPI _OFF path is not wired yet",
+                if state.as_bool() { "on" } else { "off" }
+            );
+            Ok(())
+        }
+    }
+}
+
+// ------------------------------------------------------------------ system
+
+/// Kernel platform attributes (`rcc system`).
+fn system(cli: &Cli, cmd: &Option<SystemCmd>) -> CmdResult {
+    let u = uniwill(cli).map_err(|e| format!("platform attrs need the uniwill driver: {e}"))?;
+
+    match cmd {
+        None | Some(SystemCmd::Show { name: None }) => {
+            println!("platform attributes:");
+            let mut shown = 0;
+            for (n, v) in u.platform_attrs() {
+                match v {
+                    Some(v) => {
+                        println!("  {n:24} = {v}");
+                        shown += 1;
+                    }
+                    None => println!("  {n:24} - (not exposed by this kernel/device)"),
+                }
             }
-            println!("dGPU {state} — ACPI _OFF path is not implemented yet");
+            if shown > 0 {
+                println!("\nset: rcc system set <name> <value>  (e.g. fn-lock on)");
+            }
+            Ok(())
+        }
+        Some(SystemCmd::Show { name: Some(name) }) => {
+            let n = canonical_attr(name)?;
+            println!("{n} = {}", u.get_attr(&n)?);
+            Ok(())
+        }
+        Some(SystemCmd::Set { name, value }) => {
+            let n = canonical_attr(name)?;
+            let new = u.set_attr(&n, value).map_err(|e| {
+                let allowed = attr_value_hint(&n);
+                if allowed.is_empty() {
+                    e.to_string()
+                } else {
+                    format!("{e} — {n} accepts: {allowed}")
+                }
+            })?;
+            println!("{n} → {new}");
+            Ok(())
+        }
+    }
+}
+
+/// Accept `fn-lock` / `fnlock` / `fn_lock` spellings → ABI name.
+fn canonical_attr(input: &str) -> Result<&'static str, String> {
+    let norm: String = input
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let hit = [
+        ("fnlock", "fn_lock"),
+        ("superkey", "super_key_enable"),
+        ("super", "super_key_enable"),
+        ("touchpad", "touchpad_toggle_enable"),
+        ("touchpadtoggle", "touchpad_toggle_enable"),
+        ("rainbow", "rainbow_animation"),
+        ("breathing", "breathing_in_suspend"),
+        ("breathingsuspend", "breathing_in_suspend"),
+        ("usbc", "usb_c_power_priority"),
+        ("usbcpriority", "usb_c_power_priority"),
+        ("ctgp", "ctgp_offset"),
+        ("tgp", "ctgp_offset"),
+        ("acautoboot", "ac_auto_boot"),
+        ("powershare", "usb_powershare_high"),
+        ("usbpowershare", "usb_powershare_high"),
+    ]
+    .iter()
+    .find(|(k, _)| *k == norm)
+    .map(|(_, v)| *v)
+    .or_else(|| {
+        ripple_hw::linux::PLATFORM_ATTRS
+            .iter()
+            .find(|a| a.replace('_', "") == norm)
+            .copied()
+    });
+    hit.ok_or_else(|| {
+        format!(
+            "unknown attribute '{input}' (known: {})",
+            ripple_hw::linux::PLATFORM_ATTRS.join(", ")
+        )
+    })
+}
+
+/// Legal values per attribute, for error messages.
+fn attr_value_hint(name: &str) -> &'static str {
+    match name {
+        "usb_c_power_priority" => "charging | performance",
+        "ctgp_offset" => "integer watts (GPU power, use with care)",
+        _ => "on | off",
+    }
+}
+
+// ---------------------------------------------------------------------- ec
+
+/// `1873` / `0x751` → u16.
+fn parse_addr(s: &str) -> Result<u16, String> {
+    let t = s.trim();
+    let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u16::from_str_radix(h, 16).map_err(|e| format!("bad address '{s}': {e}"))?
+    } else {
+        t.parse::<u16>().map_err(|e| format!("bad address '{s}': {e}"))?
+    };
+    Ok(v)
+}
+
+fn ec_cmd(cli: &Cli, cmd: &EcCmd) -> CmdResult {
+    match cmd {
+        EcCmd::Read { addr } => {
+            let a = parse_addr(addr)?;
+            let mut ec = open_ec(cli)?;
+            let v = ec.read(a)?;
+            println!("{a} (0x{:03x}) = 0x{v:02x} ({v})", a);
+            Ok(())
+        }
+        EcCmd::Write { addr, value, force } => {
+            let a = parse_addr(addr)?;
+            let v = if let Some(h) = value
+                .trim()
+                .strip_prefix("0x")
+                .or_else(|| value.trim().strip_prefix("0X"))
+            {
+                u8::from_str_radix(h, 16).map_err(|e| format!("bad value '{value}': {e}"))?
+            } else {
+                value
+                    .trim()
+                    .parse::<u8>()
+                    .map_err(|e| format!("bad value '{value}': {e}"))?
+            };
+            if !ripple_core::regs::is_known(a) && !*force {
+                return Err(format!(
+                    "address {a} (0x{a:03x}) is outside the known register map \
+                     — re-run with --force if you mean it"
+                ));
+            }
+            let mut ec = open_ec(cli)?;
+            let old = ec.read(a)?; // read-before-write (safety rule 1)
+            ec.write_verified(a, v)?;
+            let back = ec.read(a)?;
+            println!(
+                "{a} (0x{a:03x}): 0x{old:02x} → 0x{v:02x} (readback 0x{back:02x}, {})",
+                ec.name()
+            );
             Ok(())
         }
     }

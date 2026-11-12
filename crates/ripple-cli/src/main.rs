@@ -3,10 +3,13 @@
 //! Read-only commands work against the mock backend and the OEM file
 //! formats (UserFanTables, RGBKeyboard.reg); the real backends (acpi_call /
 //! WMI / sysfs) are selected with `--backend`.
+//!
+//! Enumerated arguments use clap `ValueEnum`, so every `--help` shows the
+//! legal values (`[possible values: …]`) instead of failing at runtime.
 
 mod commands;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -17,9 +20,9 @@ use clap::{Parser, Subcommand};
                   RGB, battery protection, monitoring, display) as a Rust CLI."
 )]
 struct Cli {
-    /// Backend: auto|mock|acpi|wmi|sysfs (default: auto → real hw, falls back to mock)
-    #[arg(long, global = true, default_value = "auto")]
-    backend: String,
+    /// Backend (auto = try real hw, fall back to mock)
+    #[arg(long, global = true, value_enum, default_value_t = Backend::Auto)]
+    backend: Backend,
 
     /// Path to the OEM package root (UserFanTables/, RGBKeyboard.reg)
     #[arg(long, global = true, env = "RCC_OEM_DIR")]
@@ -29,13 +32,39 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+pub enum Backend {
+    /// Try acpi → wmi → sysfs, fall back to the mock image
+    Auto,
+    /// In-memory sample EC (development)
+    Mock,
+    /// ECRR/ECRW via /proc/acpi/call (needs sudo)
+    Acpi,
+    /// WMBC GetSetULong via /proc/acpi/call (needs sudo)
+    Wmi,
+    /// uniwill-laptop kernel driver (sensors, lightbar, charge profiles)
+    Sysfs,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
+}
+
+impl OnOff {
+    pub fn as_bool(self) -> bool {
+        matches!(self, OnOff::On)
+    }
+}
+
 #[derive(Subcommand)]
-enum Command {
-    /// Probe hardware: backend availability, model, RGB solution
+pub enum Command {
+    /// Probe hardware: backends, ACPI paths, model, RGB solution, fixes
     Doctor,
     /// Show current mode, fans, temps, battery, RGB summary
     Status,
-    /// Live sensor table (mock backend)
+    /// Live sensor table (uniwill hwmon, falls back to EC/mock)
     Monitor {
         /// Refresh interval in seconds
         #[arg(long, default_value_t = 1.0)]
@@ -71,14 +100,58 @@ enum Command {
         #[command(subcommand)]
         cmd: DisplayCmd,
     },
+    /// Kernel platform toggles (fn-lock, super key, touchpad, USB-C priority, cTGP)
+    ///
+    /// `rcc system` alone lists every attribute with its current value.
+    System {
+        #[command(subcommand)]
+        cmd: Option<SystemCmd>,
+    },
+    /// Raw EC register access (read-before-write; dev/RE tool)
+    ///
+    /// Addresses may be decimal or hex (0x751). Writes outside the known
+    /// register map are rejected without --force.
+    Ec {
+        #[command(subcommand)]
+        cmd: EcCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EcCmd {
+    /// Read one EC byte: `rcc ec read 1873` or `rcc ec read 0x751`
+    Read { addr: String },
+    /// Write one EC byte (prints old → new + readback verify)
+    Write {
+        addr: String,
+        value: String,
+        /// Allow addresses outside the known register map
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum ModeCmd {
     /// Show current mode
     Get,
-    /// Set mode: office|gaming|turbo|benchmark
-    Set { mode: String },
+    /// Set the performance mode
+    Set {
+        #[arg(value_enum)]
+        mode: ModeChoice,
+    },
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+pub enum ModeChoice {
+    /// Silent/low power (PL defaults + fan profile)
+    Office,
+    /// Balanced gaming profile
+    Gaming,
+    /// Max sustained performance
+    Turbo,
+    /// Short-burst benchmark profile
+    Benchmark,
 }
 
 #[derive(Subcommand)]
@@ -88,10 +161,16 @@ pub enum FanCmd {
         #[command(subcommand)]
         cmd: CurveCmd,
     },
-    /// Fan boost on/off
-    Boost { state: String },
-    /// Manual fan level 0..=5
-    Level { level: u8 },
+    /// Fan boost on/off (EC fan control byte 0x40)
+    Boost {
+        #[arg(value_enum)]
+        state: OnOff,
+    },
+    /// Manual fan level 0..=5 (0 = auto/normal)
+    Level {
+        /// 0=normal, 1..=5 user levels (0x81..0x85)
+        level: u8,
+    },
 }
 
 #[derive(Subcommand)]
@@ -101,7 +180,7 @@ pub enum CurveCmd {
         #[arg(long)]
         model: Option<String>,
     },
-    /// Show one profile: `rcc fan curve show --model PH4ARxx M1T1`
+    /// Show one profile: `rcc fan curve show M1T1 --model PH4ARxx`
     Show {
         profile: String,
         #[arg(long)]
@@ -115,11 +194,11 @@ pub enum CurveCmd {
 pub enum PowerCmd {
     /// Show current PL1/PL2/TCC (EC read or mock)
     Get,
-    /// Set PL1 in watts
+    /// Set PL1 in watts (5..=150)
     Pl1 { watts: u16 },
-    /// Set PL2 in watts
+    /// Set PL2 in watts (5..=150)
     Pl2 { watts: u16 },
-    /// Set TCC offset in °C
+    /// Set TCC offset in °C (-30..=0)
     Tcc { offset: i8 },
 }
 
@@ -127,28 +206,75 @@ pub enum PowerCmd {
 pub enum RgbCmd {
     /// Show saved RGB state (from RGBKeyboard.reg)
     State,
-    /// Show effects list
+    /// Show effects list (ids as used by the EC/HID protocol)
     Effects,
-    /// Set a static color: `rcc rgb color ff8800` (or `off`)
+    /// Keyboard color: 6 hex digits (`ff8800`) or `off`
     Color { color: String },
+    /// Lightbar color: 6 hex digits, `off`, or `on` (restores full white)
+    ///
+    /// Uses the kernel LED class (`uniwill:multicolor:status`).
+    Lightbar { color: String },
 }
 
 #[derive(Subcommand)]
 pub enum BatteryCmd {
-    /// Show charge limit / protection profile
+    /// Show charge limits, charge profile, battery health/status
     Get,
-    /// Set charge limit 0..=100
+    /// Set charge limit 0..=100 (EC registers; kernel threshold attr if present)
     ChargeLimit { percent: u8 },
-    /// Set protection profile: performance|balanced|healthy
-    Profile { profile: String },
+    /// Set protection/charge profile
+    ///
+    /// OEM names map onto the kernel `charge_types` interface:
+    /// performance→Standard, balanced→Trickle, healthy→Long_Life
+    /// (native names work too).
+    Profile {
+        #[arg(value_enum)]
+        profile: ProfileChoice,
+    },
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+pub enum ProfileChoice {
+    /// OEM: full-speed charging (= charge_types Standard)
+    Performance,
+    /// OEM: gentler charging (= charge_types Trickle)
+    Balanced,
+    /// OEM: max battery longevity (= charge_types Long_Life)
+    Healthy,
+    /// charge_types: full-speed charging
+    Standard,
+    /// charge_types: reduced trickle charging
+    Trickle,
+    /// charge_types: longevity profile
+    LongLife,
 }
 
 #[derive(Subcommand)]
 pub enum DisplayCmd {
-    /// List available refresh rates (needs kscreen-doctor/xrandr)
+    /// List available refresh-rate tools (kscreen-doctor/xrandr/wlr-randr)
     Refresh,
     /// dGPU power: on|off
-    Dgpu { state: String },
+    Dgpu {
+        #[arg(value_enum)]
+        state: OnOff,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SystemCmd {
+    /// Show attributes (optionally one by name) with current values
+    Show {
+        /// Attribute name; omit to list all
+        name: Option<String>,
+    },
+    /// Set an attribute: `rcc system set fn-lock on`
+    ///
+    /// Boolean attrs take on/off (or 1/0); `usb-c-power-priority` takes
+    /// `charging|performance`; `ctgp-offset` takes a number.
+    Set {
+        name: String,
+        value: String,
+    },
 }
 
 fn main() {
