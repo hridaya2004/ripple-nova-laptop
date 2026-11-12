@@ -15,9 +15,6 @@ pub struct Settings {
     /// Font family; `None` = the system monospace font.
     #[serde(default)]
     pub font: Option<String>,
-    /// Font picker lists every installed family, not just monospace ones.
-    #[serde(default)]
-    pub all_fonts: bool,
 }
 
 impl Settings {
@@ -49,13 +46,9 @@ pub fn system_mono() -> String {
         .unwrap_or_else(|| "monospace".into())
 }
 
-/// Installed font families, sorted and de-duplicated; monospace only unless `all`.
-pub fn installed_fonts(all: bool) -> Vec<String> {
-    let mut v = if all {
-        fontconfig(&["fc-list", "-f", "%{family[0]}\n"])
-    } else {
-        fontconfig(&["fc-list", ":spacing=mono", "-f", "%{family[0]}\n"])
-    };
+/// Every installed font family (fontconfig), sorted and de-duplicated.
+pub fn installed_fonts() -> Vec<String> {
+    let mut v = fontconfig(&["fc-list", "-f", "%{family[0]}\n"]);
     v.sort_by_key(|f| f.to_lowercase());
     v.dedup();
     v
@@ -68,10 +61,11 @@ mod tests {
     #[test]
     fn defaults_are_dark_system_font_and_roundtrip() {
         let d = Settings::default();
-        assert!(!d.light && d.font.is_none() && !d.all_fonts);
-        let s = Settings { light: true, font: Some("Fira Code".into()), all_fonts: true };
+        assert!(!d.light && d.font.is_none());
+        let s = Settings { light: true, font: Some("Fira Code".into()) };
         assert_eq!(serde_json::from_str::<Settings>(&serde_json::to_string(&s).unwrap()).unwrap(), s);
-        // old/partial files still load
+        // old/partial files (even with the removed all_fonts key) still load
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), d);
+        assert_eq!(serde_json::from_str::<Settings>(r#"{"all_fonts":true}"#).unwrap(), d);
     }
 }

@@ -9,17 +9,19 @@ mod autostart;
 mod hw;
 mod settings;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    deferred, div, prelude::*, px, rgb, size, AnyElement, App, Application, Bounds, Context, Div, ElementId,
-    MouseButton, ResizeEdge, SharedString, Stateful, TitlebarOptions, Window, WindowBounds, WindowDecorations,
-    WindowOptions,
+    canvas, deferred, div, prelude::*, px, relative, rgb, size, uniform_list, AnyElement, ScrollStrategy, UniformListScrollHandle, App, Application, Bounds,
+    Context, Div, ElementId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ResizeEdge, SharedString, Stateful,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use hw::{Field, Hw, Snapshot, PROFILES};
-use ripple_core::modes::OperatingMode;
 use ripple_hw::control::{self, Hsv, Preset, Profile};
 use settings::Settings;
 
@@ -84,14 +86,12 @@ impl Palette {
 
 /// `rcc-gui [--tab profiles|fan|keyboard|system|settings] [--open] [--light] [--size WxH] [--minimized]`:
 /// where to start (handy for screenshots; `--light` forces the light theme for this run).
-/// `rcc-gui --autostart on|off|status` installs/removes/shows the start-at-login entry and exits.
+/// `rcc-gui --autostart on|off|status` installs/removes/shows the open-at-login entry and exits.
 struct Start {
     tab: Tab,
     open: bool,
     light: bool,
-    /// `--size 860x1000`: window size for this run (screenshots of whole tabs)
     size: Option<(f32, f32)>,
-    /// `--minimized`: start minimized (what the autostart entry uses)
     minimized: bool,
 }
 
@@ -109,7 +109,13 @@ impl Start {
             let (w, h) = v.split_once('x')?;
             Some((w.parse().ok()?, h.parse().ok()?))
         });
-        Self { tab, open: args.iter().any(|a| a == "--open"), light: args.iter().any(|a| a == "--light"), size, minimized: args.iter().any(|a| a == "--minimized") }
+        Self {
+            tab,
+            open: args.iter().any(|a| a == "--open"),
+            light: args.iter().any(|a| a == "--light"),
+            size,
+            minimized: args.iter().any(|a| a == "--minimized"),
+        }
     }
 }
 
@@ -123,6 +129,41 @@ enum Tab {
 }
 
 type Job = Box<dyn FnOnce(&mut Hw) -> Result<String, String> + Send>;
+/// Builds the hardware job for a slider position.
+type Pick = Rc<dyn Fn(usize) -> Job>;
+
+// ------------------------------------------------------------------ slider
+
+/// What the pointer handlers need to know about a slider, refreshed on every render.
+struct SliderReg {
+    /// Screen bounds of the track, recorded while painting.
+    bounds: Option<Bounds<Pixels>>,
+    n: usize,
+    value: usize,
+    pick: Pick,
+}
+
+struct SliderSpec {
+    id: &'static str,
+    /// Number of positions (steps + 1).
+    n: usize,
+    value: usize,
+    /// Fill the track up to the thumb.
+    fill: bool,
+    /// `(position, text)` shown under the track.
+    labels: Vec<(usize, String)>,
+    /// Paint the track as coloured cells instead (hue / saturation pickers).
+    cells: Option<Vec<u32>>,
+}
+
+/// Which of `n` positions a pointer at `x` is over; the track spans `left..left + width`.
+fn step_at(x: f32, left: f32, width: f32, n: usize) -> usize {
+    if n < 2 || width <= 0.0 {
+        return 0;
+    }
+    let frac = ((x - left) / width).clamp(0.0, 1.0);
+    (frac * (n - 1) as f32).round() as usize
+}
 
 struct Ui {
     hw: Arc<Mutex<Hw>>,
@@ -133,10 +174,14 @@ struct Ui {
     fonts: Vec<String>,
     dropdown_open: bool,
     font_open: bool,
-    /// Is the start-at-login entry installed?
+    font_scroll: UniformListScrollHandle,
+    /// Is the open-at-login entry installed?
     autostart: bool,
     /// Profile under the mouse in the dropdown, shown in the "what changes" panel.
     preview: Option<Profile>,
+    sliders: Rc<RefCell<HashMap<&'static str, SliderReg>>>,
+    /// Slider being dragged: `(id, position last sent)`.
+    drag: Option<(&'static str, usize)>,
 }
 
 impl Ui {
@@ -157,17 +202,22 @@ impl Ui {
         .detach();
         let mut settings = Settings::load();
         settings.light |= start.light;
+        let font_scroll = UniformListScrollHandle::new();
+        font_scroll.scroll_to_item(0, ScrollStrategy::Top);
         Self {
             hw,
             snap: Snapshot::default(),
             tab: start.tab,
-            fonts: settings::installed_fonts(settings.all_fonts),
+            fonts: settings::installed_fonts(),
             settings,
             system_font: settings::system_mono().into(),
             dropdown_open: start.open && start.tab == Tab::Profiles,
             font_open: start.open && start.tab == Tab::Settings,
+            font_scroll,
             autostart: autostart::Layout::system().is_enabled(),
             preview: None,
+            sliders: Rc::new(RefCell::new(HashMap::new())),
+            drag: None,
         }
     }
 
@@ -200,17 +250,15 @@ impl Ui {
         .detach();
     }
 
-    /// Switch the start-at-login entry; the result (or error) goes to the status bar.
+    /// Switch the open-at-login entry; the result (or error) goes to the status bar.
     fn toggle_autostart(&mut self, cx: &mut Context<Self>) {
         let layout = autostart::Layout::system();
         let res = if layout.is_enabled() {
-            layout.disable().map(|()| "start at login: off".to_string())
+            layout.disable().map(|()| "open at login: off".to_string())
         } else {
-            std::env::current_exe()
-                .and_then(|exe| layout.enable(&exe))
-                .map(|()| format!("start at login: on (installed {})", layout.dir.display()))
+            std::env::current_exe().and_then(|exe| layout.enable(&exe)).map(|()| "open at login: on".to_string())
         };
-        self.hw.lock().unwrap_or_else(|e| e.into_inner()).event = res.unwrap_or_else(|e| format!("error: start at login: {e}"));
+        self.hw.lock().unwrap_or_else(|e| e.into_inner()).event = res.unwrap_or_else(|e| format!("error: open at login: {e}"));
         self.autostart = layout.is_enabled();
         cx.notify();
     }
@@ -221,6 +269,145 @@ impl Ui {
             self.hw.lock().unwrap_or_else(|e| e.into_inner()).event = format!("error: could not save settings: {e}");
         }
         cx.notify();
+    }
+
+    // ---- slider pointer handling
+
+    fn step_for(&self, id: &'static str, x: f32) -> Option<(usize, usize, Pick)> {
+        let reg = self.sliders.borrow();
+        let r = reg.get(id)?;
+        let b = r.bounds?;
+        Some((step_at(x, f32::from(b.origin.x), f32::from(b.size.width), r.n), r.value, r.pick.clone()))
+    }
+
+    fn slider_press(&mut self, id: &'static str, x: f32, cx: &mut Context<Self>) {
+        if let Some((i, value, pick)) = self.step_for(id, x) {
+            self.drag = Some((id, i));
+            if i != value {
+                let job = pick(i);
+                self.act(cx, job);
+            }
+            cx.notify();
+        }
+    }
+
+    fn slider_drag(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some((id, last)) = self.drag else { return };
+        if let Some((i, _, pick)) = self.step_for(id, x) {
+            if i != last {
+                self.drag = Some((id, i));
+                let job = pick(i);
+                self.act(cx, job);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Send the final position once more: drag updates run as independent jobs, this guarantees
+    /// the hardware ends on the value the thumb was released at.
+    fn slider_release(&mut self, cx: &mut Context<Self>) {
+        let Some((id, i)) = self.drag.take() else { return };
+        let pick = self.sliders.borrow().get(id).map(|r| r.pick.clone());
+        if let Some(pick) = pick {
+            let job = pick(i);
+            self.act(cx, job);
+        }
+    }
+
+    /// A stepped slider: track (or coloured cells), fill, ticks, a thumb and optional labels.
+    /// Click anywhere on it or drag; the thumb snaps to the nearest step.
+    fn slider(&self, cx: &mut Context<Self>, spec: SliderSpec, pick: impl Fn(usize) -> Job + 'static) -> Stateful<Div> {
+        let p = self.p();
+        let id = spec.id;
+        let n = spec.n.max(2);
+        let prev = self.sliders.borrow().get(id).and_then(|r| r.bounds);
+        self.sliders.borrow_mut().insert(id, SliderReg { bounds: prev, n, value: spec.value, pick: Rc::new(pick) });
+
+        // while dragging show the thumb where the pointer is, not where the hardware last was
+        let shown = match self.drag {
+            Some((d, i)) if d == id => i,
+            _ => spec.value,
+        };
+        let frac = |i: usize| i as f32 / (n - 1) as f32;
+        let regs = self.sliders.clone();
+
+        let mut inner = div().absolute().left(px(10.)).right(px(10.)).top_0().bottom_0().child(
+            canvas(
+                move |bounds, _, _| {
+                    if let Some(r) = regs.borrow_mut().get_mut(id) {
+                        r.bounds = Some(bounds);
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        );
+
+        match &spec.cells {
+            Some(cells) => {
+                inner = inner.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(10.))
+                        .h(px(10.))
+                        .flex()
+                        .rounded_sm()
+                        .overflow_hidden()
+                        .children(cells.iter().map(|c| div().flex_1().h_full().bg(rgb(*c)))),
+                );
+            }
+            None => {
+                inner = inner.child(div().absolute().left_0().right_0().top(px(12.)).h(px(6.)).rounded_full().bg(rgb(p.border)));
+                if spec.fill {
+                    inner = inner.child(div().absolute().left_0().top(px(12.)).h(px(6.)).w(relative(frac(shown))).rounded_full().bg(rgb(p.accent)));
+                }
+                if n <= 24 {
+                    for i in 0..n {
+                        inner = inner.child(div().absolute().left(relative(frac(i))).top(px(24.)).w(px(1.)).h(px(4.)).bg(rgb(p.muted)));
+                    }
+                }
+            }
+        }
+        inner = inner.child(
+            div()
+                .absolute()
+                .left(relative(frac(shown)))
+                .ml(px(-8.))
+                .top(px(7.))
+                .size(px(16.))
+                .rounded_full()
+                .bg(rgb(p.popup))
+                .border_2()
+                .border_color(rgb(p.accent))
+                .shadow_sm(),
+        );
+        for (i, text) in &spec.labels {
+            inner = inner.child(
+                div()
+                    .absolute()
+                    .left(relative(frac(*i)))
+                    .ml(px(-22.))
+                    .w(px(44.))
+                    .top(px(30.))
+                    .flex()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(if *i == shown { p.fg } else { p.muted }))
+                    .child(text.clone()),
+            );
+        }
+
+        div()
+            .id(id)
+            .relative()
+            .w_full()
+            .h(px(if spec.labels.is_empty() { 32. } else { 50. }))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |ui, e: &MouseDownEvent, _, cx| ui.slider_press(id, f32::from(e.position.x), cx)))
+            .child(inner)
     }
 }
 
@@ -276,13 +463,12 @@ fn hsv_hex(h: u16, sat: u8, v: u8) -> u32 {
     (f(r) << 16) | (f(g) << 8) | f(b)
 }
 
-/// One line of the "what changes" panel: `PL1  35 W → 55 W` (or "unchanged").
+/// One line of the "what changes" panel: `PL1  35 W → 55 W` (or unchanged).
 fn change(p: Palette, label: &str, from: Option<u8>, to: u8, prefix: &str) -> Div {
-    let to_s = format!("{prefix}{to} W");
     let value = match from {
-        Some(f) if f == to => format!("{prefix}{f} W (unchanged)"),
-        Some(f) => format!("{prefix}{f} W → {to_s}"),
-        None => to_s,
+        Some(f) if f == to => format!("{prefix}{f} W"),
+        Some(f) => format!("{prefix}{f} W → {prefix}{to} W"),
+        None => format!("{prefix}{to} W"),
     };
     let mut r = row(p, label.to_string(), value);
     if matches!(from, Some(f) if f != to) {
@@ -408,6 +594,11 @@ impl Ui {
         if cfg!(debug_assertions) && !s.debug.is_empty() {
             left = format!("{left} · debug: {}", s.debug);
         }
+        let (dot, label) = match (s.button, s.service) {
+            (true, true) => ("●", "mode button (service)"),
+            (true, false) => ("●", "mode button"),
+            _ => ("○", "mode button off"),
+        };
         div()
             .h(px(24.))
             .px_3()
@@ -422,50 +613,7 @@ impl Ui {
             .text_color(rgb(p.muted))
             .child(div().truncate().child(left))
             .child(div().truncate().child(s.event.clone()))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(rgb(if s.button { p.green } else { p.muted }))
-                    .child(if s.button { "● mode button followed" } else { "○ mode button not followed" }),
-            )
-    }
-
-    /// A row of clickable cells acting as a slider. `lit_from_start` fills the bar up to the
-    /// selection (levels); otherwise only the selected cell is marked (threshold with an "Off").
-    fn stepped(
-        &self,
-        cx: &mut Context<Self>,
-        id: &'static str,
-        labels: Vec<String>,
-        sel: usize,
-        lit_from_start: bool,
-        pick: impl Fn(usize) -> Job + 'static,
-    ) -> Div {
-        let p = self.p();
-        let pick = Rc::new(pick);
-        let mut bar = div().flex().gap_1();
-        for (i, label) in labels.into_iter().enumerate() {
-            let pick = pick.clone();
-            let lit = if lit_from_start { i <= sel } else { i <= sel && sel > 0 };
-            let colour = if lit { p.accent } else if i == sel { p.muted } else { p.border };
-            bar = bar.child(
-                div()
-                    .id((id, i))
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |ui, _, _, cx| {
-                        let job = pick(i);
-                        ui.act(cx, job);
-                    }))
-                    .child(div().h(px(10.)).w_full().rounded_sm().bg(rgb(colour)))
-                    .child(div().text_size(px(11.)).text_color(rgb(if i == sel { p.fg } else { p.muted })).child(label)),
-            );
-        }
-        bar
+            .child(div().flex_shrink_0().text_color(rgb(if s.button { p.green } else { p.muted })).child(format!("{dot} {label}")))
     }
 
     // -------------------------------------------------------------- tabs
@@ -580,17 +728,28 @@ impl Ui {
         wrap
     }
 
+    /// A watt slider (5 W steps) for one Custom-preset value.
+    fn custom_slider(&self, cx: &mut Context<Self>, id: &'static str, field: Field, value: u8, lo: u8, hi: u8) -> Stateful<Div> {
+        let steps: Vec<u8> = (lo..=hi).step_by(5).collect();
+        let sel = steps.iter().position(|v| *v >= value).unwrap_or(steps.len() - 1);
+        let labels = vec![(0, lo.to_string()), (steps.len() - 1, hi.to_string())];
+        self.slider(cx, SliderSpec { id, n: steps.len(), value: sel, fill: true, labels, cells: None }, move |i| {
+            let v = steps[i];
+            Box::new(move |hw| hw.set_custom(field, v))
+        })
+    }
+
     fn profiles_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p();
         let s = &self.snap;
         let target = self.preview.or(s.profile);
 
-        // "What changes" for the hovered (or, when closed, the active) profile.
+        // What the hovered (or, when closed, the active) profile sets.
         let mut changes = section(
             p,
             &match target {
-                Some(m) if Some(m) != s.profile => format!("Switching to {} changes", m.name()),
-                Some(m) => format!("{} sets", m.name()),
+                Some(m) if Some(m) != s.profile => format!("Switch to {}", m.name()),
+                Some(m) => m.name().to_string(),
                 None => "Current limits".to_string(),
             },
         );
@@ -598,84 +757,50 @@ impl Ui {
             Some(m) => {
                 let pr = preset_of(s, m);
                 changes = changes
-                    .child(change(p, "CPU sustained power (PL1)", s.pl.map(|v| v.0), pr.pl1, ""))
-                    .child(change(p, "CPU boost power (PL2)", s.pl.map(|v| v.1), pr.pl2, ""))
-                    .child(change(p, "GPU configurable TGP (cTGP)", s.ctgp, pr.ctgp, "+"))
-                    .child(row(p, "Fan profile", "follows the mode (EC mode byte); boost is separate"));
-                if m == Profile::Stock(OperatingMode::Turbo) {
-                    changes = changes.child(note(p, "Turbo values are the stock app's for this machine (80 W, cTGP +20 W). It runs hot: expect throttling near 100 °C under all-core load. The GPU part only takes effect with the NVIDIA proprietary driver (this system uses nouveau)."));
-                }
-                if m == Profile::Custom {
-                    changes = changes.child(note(p, "Your own preset: edit it in the Custom preset section below."));
-                }
+                    .child(change(p, "CPU PL1", s.pl.map(|v| v.0), pr.pl1, ""))
+                    .child(change(p, "CPU PL2", s.pl.map(|v| v.1), pr.pl2, ""))
+                    .child(change(p, "GPU cTGP", s.ctgp, pr.ctgp, "+"));
             }
             None => {
                 if let Some((a, b)) = s.pl {
-                    changes = changes.child(row(p, "PL1 / PL2", format!("{a} / {b} W (matches no profile)")));
+                    changes = changes.child(row(p, "CPU PL1 / PL2", format!("{a} / {b} W")));
                 }
             }
         }
 
-        // The only editable preset. Stock Office/Gaming/Turbo are fixed; anything custom lives here.
+        // The only editable preset; the stock three are fixed.
         let c = s.custom;
-        let stepper = |field: Field, label: &'static str, value: u8, prefix: &'static str, base: usize| {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(div().w(px(40.)).text_color(rgb(p.muted)).child(label))
-                .child(
-                    button(p, ("dec", base), "−", false)
-                        .on_click(cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.adjust_custom(field, -5)))),
-                )
-                .child(div().w(px(64.)).flex().justify_center().child(format!("{prefix}{value} W")))
-                .child(
-                    button(p, ("inc", base), "+", false)
-                        .on_click(cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.adjust_custom(field, 5)))),
-                )
-        };
         let custom = section(p, "Custom preset")
-            .child(div().flex().flex_wrap().gap_x_6().gap_y_2()
-                .child(stepper(Field::Pl1, "PL1", c.pl1, "", 0))
-                .child(stepper(Field::Pl2, "PL2", c.pl2, "", 1))
-                .child(stepper(Field::Ctgp, "cTGP", c.ctgp, "+", 2)))
-            .child(note(p, format!(
-                "Office, Gaming and Turbo are the stock presets and can't be edited. Change this one instead, then pick Custom in the dropdown to use it (the hardware button only cycles the stock three). Limits are capped at {} W (cTGP {} W); saved in {}.",
-                control::PL_CEILING_W,
-                control::CTGP_CEILING_W,
-                control::Config::PATH
-            )));
+            .child(row(p, "CPU PL1", format!("{} W", c.pl1)))
+            .child(self.custom_slider(cx, "custom-pl1", Field::Pl1, c.pl1, 5, control::PL_CEILING_W))
+            .child(row(p, "CPU PL2", format!("{} W", c.pl2)))
+            .child(self.custom_slider(cx, "custom-pl2", Field::Pl2, c.pl2, 5, control::PL_CEILING_W))
+            .child(row(p, "GPU cTGP", format!("+{} W", c.ctgp)))
+            .child(self.custom_slider(cx, "custom-ctgp", Field::Ctgp, c.ctgp, 0, control::CTGP_CEILING_W))
+            .child(note(p, "Office, Gaming and Turbo are fixed."));
 
         let mut page = div().flex().flex_col().gap_3();
         if let Some(e) = &s.ec_error {
-            page = page.child(div().p_3().rounded_md().bg(rgb(p.err_bg)).text_color(rgb(p.red)).child(format!("EC unavailable, profiles disabled: {e}")));
+            page = page.child(div().p_3().rounded_md().bg(rgb(p.err_bg)).text_color(rgb(p.red)).child(format!("EC unavailable: {e}")));
         }
-        page.child(section(p, "Profile").child(self.profile_dropdown(cx)).child(note(
-            p,
-            "The hardware mode button cycles Office → Gaming → Turbo while this app (or `rcc watch`) is running, and its lights follow the profile: 0 lights Office, 1 Gaming, 2 Turbo (Custom shows as 1).",
-        )))
-        .child(changes)
-        .child(custom)
-        .into_any_element()
+        page.child(section(p, "Profile").child(self.profile_dropdown(cx))).child(changes).child(custom).into_any_element()
     }
 
     fn fan_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p();
         let s = &self.snap;
 
-        let mode = section(p, "Fan mode")
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(button(p, "fan-auto", "Auto", !s.boosted).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_boost(false)))))
-                    .child(button(p, "fan-boost", "Boost", s.boosted).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_boost(true))))),
-            )
-            .child(note(p, "Auto: the firmware's own curve. Boost: both fans at full speed."));
+        let mode = section(p, "Fan mode").child(
+            div()
+                .flex()
+                .gap_2()
+                .child(button(p, "fan-auto", "Auto", !s.boosted).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_boost(false)))))
+                .child(button(p, "fan-boost", "Boost", s.boosted).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_boost(true))))),
+        );
 
-        let mut fans = section(p, "Fans");
+        let mut fans = section(p, "Sensors");
         if s.temps.is_empty() && s.fans.is_empty() {
-            fans = fans.child(note(p, "no uniwill hwmon (kernel driver not loaded?)"));
+            fans = fans.child(note(p, "no hwmon sensors"));
         }
         for (l, c) in &s.temps {
             fans = fans.child(row(p, l.clone(), format!("{c:.1} °C")));
@@ -684,23 +809,24 @@ impl Ui {
             fans = fans.child(row(p, l.clone(), format!("{rpm} rpm{}", duty.map(|d| format!("  ({d} %)")).unwrap_or_default())));
         }
 
-        // Stepped slider: Off, then 60..=95 °C in 5 °C steps.
+        // Off, then 60..=95 °C in 5 °C steps.
         let steps: Vec<Option<u8>> = std::iter::once(None).chain((60..=95).step_by(5).map(Some)).collect();
         let sel = steps.iter().position(|t| *t == s.auto_boost).unwrap_or(0);
-        let labels = steps.iter().map(|t| t.map_or("Off".to_string(), |v| v.to_string())).collect();
-        let slider = self.stepped(cx, "ab", labels, sel, false, move |i| {
-            let t = steps[i];
-            Box::new(move |hw| hw.set_auto_boost(t))
-        });
+        let labels = steps.iter().enumerate().map(|(i, t)| (i, t.map_or("Off".to_string(), |v| v.to_string()))).collect();
+        let slider = self.slider(
+            cx,
+            SliderSpec { id: "auto-boost", n: steps.len(), value: sel, fill: sel > 0, labels, cells: None },
+            move |i| {
+                let t = steps[i];
+                Box::new(move |hw| hw.set_auto_boost(t))
+            },
+        );
         let auto = section(p, "Auto-boost")
-            .child(row(p, "Boost the fans above", s.auto_boost.map_or("off".to_string(), |t| format!("{t} °C"))))
-            .child(slider)
-            .child(note(p, "Switches Fan boost on when the hottest sensor reaches the threshold and back off 8 °C lower. Runs while this app is open; it never switches off a boost you set yourself."));
+            .child(row(p, "Boost above", s.auto_boost.map_or("off".to_string(), |t| format!("{t} °C"))))
+            .child(slider);
 
-        let limits = section(p, "Manual fan speed and custom fan curves: unavailable").child(note(
-            p,
-            "Why: this EC's user fan tables are empty (curve RAM 3840-4095 reads all zero, so there is nothing to base a curve on or restore) and the manual levels would read those empty tables (registers 1859-1862 are GPU power settings on this model). Writing them could tell the fans to stop, so only Auto and Boost are offered.",
-        ));
+        let limits = section(p, "Manual fan speed and curves: unavailable")
+            .child(note(p, "The fan tables on this laptop are empty, so there is nothing safe to write."));
 
         div().flex().flex_col().gap_3().child(mode).child(fans).child(auto).child(limits).into_any_element()
     }
@@ -709,14 +835,12 @@ impl Ui {
         let p = self.p();
         let s = &self.snap;
         if !s.has_keyboard {
-            return section(p, "Keyboard backlight: unavailable")
-                .child(note(p, "The EC reports no RGB keyboard on this machine."))
-                .into_any_element();
+            return section(p, "Keyboard backlight: unavailable").child(note(p, "No RGB keyboard reported by the EC.")).into_any_element();
         }
         let hsv = s.hsv;
         let full = hsv_hex(hsv.h, hsv.s, 100);
 
-        // Presets (hue + saturation; the brightness you chose is kept).
+        // Presets set hue and saturation; the brightness you chose is kept.
         let colours: [(u16, u8); 9] = [(0, 100), (30, 100), (60, 100), (120, 100), (180, 100), (240, 100), (270, 80), (300, 100), (0, 0)];
         let swatches = div().flex().flex_wrap().gap_2().children(colours.iter().enumerate().map(|(i, (h, sat))| {
             let (h, sat) = (*h, *sat);
@@ -734,120 +858,107 @@ impl Ui {
                 }))
         }));
 
-        // Colour picker: a hue strip and a saturation strip, each cell painted with its colour.
-        let strip = |id: &'static str, cells: Vec<(u32, bool)>, pick: Rc<dyn Fn(usize) -> Job>| {
-            div().flex().gap_px().children(cells.into_iter().enumerate().map(|(i, (hex, selected))| {
-                let pick = pick.clone();
-                div()
-                    .id((id, i))
-                    .flex_1()
-                    .h(px(26.))
-                    .cursor_pointer()
-                    .bg(rgb(hex))
-                    .border_2()
-                    .border_color(rgb(if selected { p.fg } else { hex }))
-                    .on_click(cx.listener(move |ui, _, _, cx| {
-                        let job = pick(i);
-                        ui.act(cx, job);
-                    }))
-            }))
-        };
-        let hue_sel = usize::from(hsv.h / 10) % 36;
-        let hues = strip(
-            "kb-hue",
-            (0..36).map(|i| (hsv_hex(i * 10, 100, 100), i as usize == hue_sel)).collect(),
-            Rc::new(move |i| {
-                let h = i as u16 * 10;
+        let hue = self.slider(
+            cx,
+            SliderSpec {
+                id: "kb-hue",
+                n: 36,
+                value: usize::from(hsv.h / 10) % 36,
+                fill: false,
+                labels: vec![(0, "0°".into()), (18, "180°".into()), (35, "350°".into())],
+                cells: Some((0..36).map(|i| hsv_hex(i * 10, 100, 100)).collect()),
+            },
+            |i| {
                 Box::new(move |hw| {
                     let cur = hw.hsv();
-                    hw.set_keyboard(Hsv { h, ..cur })
+                    hw.set_keyboard(Hsv { h: i as u16 * 10, s: if cur.s == 0 { 100 } else { cur.s }, v: cur.v })
                 })
-            }),
+            },
         );
-        let sat_sel = (usize::from(hsv.s) + 5) / 10;
-        let sats = strip(
-            "kb-sat",
-            (0..=10).map(|i| (hsv_hex(hsv.h, i as u8 * 10, 100), i == sat_sel)).collect(),
-            Rc::new(move |i| {
-                let sat = i as u8 * 10;
+        let sat = self.slider(
+            cx,
+            SliderSpec {
+                id: "kb-sat",
+                n: 11,
+                value: (usize::from(hsv.s) + 5) / 10,
+                fill: false,
+                labels: vec![(0, "0%".into()), (10, "100%".into())],
+                cells: Some((0..=10).map(|i| hsv_hex(hsv.h, i * 10, 100)).collect()),
+            },
+            |i| {
                 Box::new(move |hw| {
                     let cur = hw.hsv();
-                    hw.set_keyboard(Hsv { s: sat, ..cur })
+                    hw.set_keyboard(Hsv { s: i as u8 * 10, ..cur })
                 })
-            }),
+            },
         );
-
-        // Brightness: the EC only stores colour levels, so this scales them.
-        let steps: Vec<u8> = (0..=100).step_by(10).collect();
-        let labels = steps.iter().map(|v| v.to_string()).collect();
-        let sel = (usize::from(hsv.v) + 5) / 10;
-        let brightness = self.stepped(cx, "kb-v", labels, sel, true, move |i| {
-            let v = i as u8 * 10;
-            Box::new(move |hw| {
-                let cur = hw.hsv();
-                hw.set_keyboard(Hsv { v, ..cur })
-            })
-        });
+        let bright = self.slider(
+            cx,
+            SliderSpec {
+                id: "kb-bright",
+                n: 21,
+                value: (usize::from(hsv.v) + 2) / 5,
+                fill: true,
+                labels: vec![(0, "0".into()), (10, "50".into()), (20, "100".into())],
+                cells: None,
+            },
+            |i| {
+                Box::new(move |hw| {
+                    let cur = hw.hsv();
+                    hw.set_keyboard(Hsv { v: i as u8 * 5, ..cur })
+                })
+            },
+        );
 
         div()
             .flex()
             .flex_col()
             .gap_3()
             .child(
-                section(p, "Keyboard backlight colour")
+                section(p, "Colour")
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_3()
                             .child(div().size_8().rounded_md().bg(rgb(full)).border_1().border_color(rgb(p.border)))
-                            .child(format!("#{full:06x} · hue {}° · saturation {} %", hsv.h, hsv.s)),
+                            .child(format!("#{full:06x}")),
                     )
                     .child(swatches),
             )
             .child(
-                section(p, "Colour picker")
-                    .child(div().text_color(rgb(p.muted)).child("Hue"))
-                    .child(hues)
-                    .child(div().text_color(rgb(p.muted)).child("Saturation"))
-                    .child(sats),
+                section(p, "Picker")
+                    .child(row(p, "Hue", format!("{}°", hsv.h)))
+                    .child(hue)
+                    .child(row(p, "Saturation", format!("{} %", hsv.s)))
+                    .child(sat),
             )
-            .child(
-                section(p, "Brightness")
-                    .child(row(p, "Backlight brightness", format!("{} %", hsv.v)))
-                    .child(brightness)
-                    .child(note(p, "The firmware has no separate brightness register for this keyboard, so this dims the colour itself (EC registers 1897-1899 plus the apply bit). The Fn brightness keys keep working on top of it.")),
-            )
+            .child(section(p, "Brightness").child(row(p, "Level", format!("{} %", hsv.v))).child(bright))
             .into_any_element()
     }
 
     fn system_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p();
         let s = &self.snap;
-        let describe = |name: &str| match name {
-            "fn_lock" => ("Fn lock", "F-keys act as media keys unless Fn is held"),
-            "super_key_enable" => ("Super key", "Enable the Super (Windows) key"),
-            "rainbow_animation" => ("Lightbar rainbow", "Rainbow animation on the lightbar"),
-            "breathing_in_suspend" => ("Lightbar breathing", "Breathing animation while suspended"),
-            _ => ("", ""),
-        };
-        let mut toggles = section(p, "Keyboard & platform");
+        fn label(name: &str) -> &str {
+            match name {
+                "fn_lock" => "Fn lock",
+                "super_key_enable" => "Super key",
+                "rainbow_animation" => "Lightbar rainbow",
+                "breathing_in_suspend" => "Lightbar breathing",
+                other => other,
+            }
+        }
+        let mut toggles = section(p, "Toggles");
         if s.toggles.is_empty() {
-            toggles = toggles.child(note(p, "none exposed"));
+            toggles = toggles.child(note(p, "none"));
         }
         for (i, (name, on)) in s.toggles.iter().copied().enumerate() {
-            let (label, help) = describe(name);
-            let label = if label.is_empty() { name } else { label };
             toggles = toggles.child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .gap_4()
-                    .child(div().flex().flex_col().child(label).child(note(p, help)))
-                    .child(button(p, ("toggle", i), if on { "On" } else { "Off" }, on).on_click(
-                        cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on))),
-                    )),
+                div().flex().justify_between().items_center().gap_4().child(label(name)).child(
+                    button(p, ("toggle", i), if on { "On" } else { "Off" }, on)
+                        .on_click(cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on)))),
+                ),
             );
         }
 
@@ -872,22 +983,19 @@ impl Ui {
                     .child(button(p, "lb-off", "Off", false).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_lightbar(None))))),
             );
         } else {
-            page = page.child(section(p, "Lightbar").child(note(
-                p,
-                "This laptop has no lightbar (EC support flag clear, same as the stock app's LightbarSupport = 0). The kernel driver still exposes one, so its controls are hidden. The keyboard backlight colour is on the Keyboard tab.",
-            )));
+            page = page.child(note(p, "No lightbar on this laptop."));
         }
         page.into_any_element()
     }
 
-    /// Font select: same popover pattern as the profile dropdown; every entry is drawn in its
-    /// own font. The first entry is the default, the system monospace font.
+    /// Font select: same popover pattern as the profile dropdown. Every installed family is listed
+    /// (virtualized, so hundreds of entries stay fast) and drawn in its own font. The first entry
+    /// is the default, the system monospace font.
     fn font_dropdown(&self, cx: &mut Context<Self>) -> Div {
         const W: f32 = 400.;
         let p = self.p();
         let open = self.font_open;
-        let default_label = format!("Monospace (system default: {})", self.system_font);
-        let current = self.settings.font.clone().unwrap_or_else(|| default_label.clone());
+        let current = self.settings.font.clone().unwrap_or_else(|| format!("Monospace (system: {})", self.system_font));
 
         let trigger = div()
             .id("font-dropdown")
@@ -905,6 +1013,10 @@ impl Ui {
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, cx.listener(move |ui, _, _, cx| {
                 ui.font_open = !open;
+                if !open {
+                    let sel = ui.settings.font.as_ref().and_then(|f| ui.fonts.iter().position(|n| n == f)).map_or(0, |i| i + 1);
+                    ui.font_scroll.scroll_to_item(sel, ScrollStrategy::Top);
+                }
                 cx.notify();
             }))
             .child(div().truncate().font_family(self.family()).child(current))
@@ -912,16 +1024,50 @@ impl Ui {
 
         let mut wrap = div().relative().w(px(W)).child(trigger);
         if open {
-            let mut list = div()
-                .id("font-list")
+            let rows = uniform_list(
+                "font-rows",
+                self.fonts.len() + 1,
+                cx.processor(|ui, range: Range<usize>, _window, cx| {
+                    let p = ui.p();
+                    range
+                        .map(|ix| {
+                            let (label, family, pick, active) = if ix == 0 {
+                                (format!("Monospace (system: {})", ui.system_font), ui.system_font.clone(), None, ui.settings.font.is_none())
+                            } else {
+                                let n = ui.fonts[ix - 1].clone();
+                                let active = ui.settings.font.as_deref() == Some(n.as_str());
+                                (n.clone(), SharedString::from(n.clone()), Some(n), active)
+                            };
+                            div()
+                                .id(("font", ix))
+                                .h(px(28.))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(move |st| st.bg(rgb(p.hover)))
+                                .when(active, |d| d.text_color(rgb(p.accent)))
+                                .on_click(cx.listener(move |ui, _, _, cx| {
+                                    ui.settings.font = pick.clone();
+                                    ui.font_open = false;
+                                    ui.save_settings(cx);
+                                }))
+                                .child(div().truncate().font_family(family).child(label))
+                                .child(div().text_color(rgb(p.accent)).child(if active { "●" } else { "" }))
+                        })
+                        .collect()
+                }),
+            )
+            .track_scroll(self.font_scroll.clone())
+            .h(px(280.));
+            let list = div()
                 .absolute()
                 .top(px(36.))
                 .left_0()
                 .w(px(W))
-                .max_h(px(300.))
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
                 .p_1()
                 .rounded_md()
                 .border_1()
@@ -932,35 +1078,8 @@ impl Ui {
                 .on_mouse_down_out(cx.listener(|ui, _, _, cx| {
                     ui.font_open = false;
                     cx.notify();
-                }));
-            let entry = |i: usize, label: String, family: SharedString, pick: Option<String>, active: bool| {
-                div()
-                    .id(("font", i))
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .justify_between()
-                    .gap_3()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(move |st| st.bg(rgb(p.hover)))
-                    .when(active, |d| d.text_color(rgb(p.accent)))
-                    .on_click(cx.listener(move |ui, _, _, cx| {
-                        ui.settings.font = pick.clone();
-                        ui.font_open = false;
-                        ui.save_settings(cx);
-                    }))
-                    .child(div().truncate().font_family(family).child(label))
-                    .child(div().text_color(rgb(p.accent)).child(if active { "●" } else { "" }))
-            };
-            list = list.child(entry(0, default_label, self.system_font.clone(), None, self.settings.font.is_none()));
-            for (i, name) in self.fonts.iter().cloned().enumerate() {
-                let active = self.settings.font.as_deref() == Some(name.as_str());
-                list = list.child(entry(i + 1, name.clone(), SharedString::from(name.clone()), Some(name), active));
-            }
-            if self.fonts.is_empty() {
-                list = list.child(div().p_2().child(note(p, "fontconfig (fc-list) returned no fonts")));
-            }
+                }))
+                .child(rows);
             wrap = wrap.child(deferred(list).with_priority(1));
         }
         wrap
@@ -986,23 +1105,18 @@ impl Ui {
 
         let font = section(p, "Font")
             .child(self.font_dropdown(cx))
-            .child(div().font_family(self.family()).child("The quick brown fox · 0123456789 · PL1 35 W / PL2 35 W"))
-            .child(button(p, "font-all", if self.settings.all_fonts { "Listing all fonts" } else { "Listing monospace fonts only" }, self.settings.all_fonts).on_click(
-                cx.listener(|ui, _, _, cx| {
-                    ui.settings.all_fonts = !ui.settings.all_fonts;
-                    ui.fonts = settings::installed_fonts(ui.settings.all_fonts);
-                    ui.save_settings(cx);
-                }),
-            ))
-            .child(note(p, format!("{} families available. Default: the system monospace font. Saved in /etc/ripple-nova/gui.json.", self.fonts.len())));
+            .child(div().font_family(self.family()).child("The quick brown fox 0123456789"));
 
-        let startup = section(p, "Start at login")
+        let startup = section(p, "Startup")
             .child(
-                div().flex().items_center().gap_3()
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
                     .child(button(p, "autostart", if self.autostart { "On" } else { "Off" }, self.autostart).on_click(cx.listener(|ui, _, _, cx| ui.toggle_autostart(cx))))
-                    .child("Start Ripple Control Center when I log in"),
+                    .child("Open at login"),
             )
-            .child(note(p, "Starts the app minimized so the mode button is followed and the mode lights match the profile after every boot. No systemd service: it is an autostart entry (/etc/xdg/autostart/ripple-nova.desktop). The app needs root, so you will get a polkit password prompt at each login. It runs a root-owned copy installed in /usr/local/lib/ripple-nova (so an unprivileged process cannot swap it); switch the option off and on after rebuilding to refresh that copy."));
+            .child(note(p, "Starts minimized and asks for your password."));
 
         div().flex().flex_col().gap_3().child(theme).child(font).child(startup).into_any_element()
     }
@@ -1030,6 +1144,17 @@ impl Render for Ui {
             .text_size(px(13.))
             .border_1()
             .border_color(rgb(p.border))
+            // slider drags continue outside the slider, anywhere in the window
+            .on_mouse_move(cx.listener(|ui, e: &MouseMoveEvent, _, cx| {
+                if ui.drag.is_some() {
+                    if e.pressed_button == Some(MouseButton::Left) {
+                        ui.slider_drag(f32::from(e.position.x), cx);
+                    } else {
+                        ui.slider_release(cx);
+                    }
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|ui, _, _, cx| ui.slider_release(cx)))
             .child(self.titlebar())
             .child(self.tab_bar(cx))
             .child(div().id("content").flex_1().min_h_0().overflow_y_scroll().p_4().child(body))
@@ -1041,9 +1166,16 @@ impl Render for Ui {
 // ------------------------------------------------------------------ startup
 
 /// Follow the hardware mode button (WMI event 176 = key 184): each press cycles the profile,
-/// exactly what the stock Windows service does. Runs for the life of the process.
+/// exactly what the stock Windows service does. Only one process may follow it: when the systemd
+/// service already holds the lock, the app leaves the button to it.
 fn spawn_mode_button(hw: Arc<Mutex<Hw>>) {
     std::thread::spawn(move || {
+        let Some(_lock) = control::follow_lock(false) else {
+            let mut hw = hw.lock().unwrap_or_else(|e| e.into_inner());
+            hw.button = true;
+            hw.service = true;
+            return;
+        };
         let mut dev = match control::open_mode_key() {
             Ok(d) => d,
             Err(e) => {
@@ -1078,7 +1210,7 @@ fn main() {
             }
         };
         match res {
-            Ok(()) => println!("start at login: {}", if layout.is_enabled() { "on" } else { "off" }),
+            Ok(()) => println!("open at login: {}", if layout.is_enabled() { "on" } else { "off" }),
             Err(e) => {
                 eprintln!("error: {e}");
                 std::process::exit(1);
@@ -1122,4 +1254,23 @@ fn main() {
         .unwrap();
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slider_snaps_to_the_nearest_step_and_clamps_at_the_ends() {
+        // 5 positions across a 400 px track starting at x = 100 → steps every 100 px
+        assert_eq!(step_at(100.0, 100.0, 400.0, 5), 0);
+        assert_eq!(step_at(149.0, 100.0, 400.0, 5), 0);
+        assert_eq!(step_at(151.0, 100.0, 400.0, 5), 1);
+        assert_eq!(step_at(300.0, 100.0, 400.0, 5), 2);
+        assert_eq!(step_at(500.0, 100.0, 400.0, 5), 4);
+        assert_eq!(step_at(-50.0, 100.0, 400.0, 5), 0, "left of the track");
+        assert_eq!(step_at(900.0, 100.0, 400.0, 5), 4, "right of the track");
+        assert_eq!(step_at(250.0, 100.0, 0.0, 5), 0, "not laid out yet");
+        assert_eq!(step_at(250.0, 100.0, 400.0, 1), 0, "single position");
+    }
 }

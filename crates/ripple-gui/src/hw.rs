@@ -49,8 +49,9 @@ pub struct Snapshot {
     pub keyboard: Option<(u8, u8, u8)>,
     pub hsv: Hsv,
     pub toggles: Vec<(&'static str, bool)>,
-    /// Is the hardware mode button being followed?
+    /// Is the hardware mode button being followed, and by the systemd service rather than by us?
     pub button: bool,
+    pub service: bool,
     /// Raw EC values, shown in debug builds only.
     pub debug: String,
     /// Last action / hardware-button result for the status bar.
@@ -80,6 +81,7 @@ impl Default for Snapshot {
             hsv: Hsv { h: 180, s: 100, v: 100 },
             toggles: vec![],
             button: false,
+            service: false,
             debug: String::new(),
             event: String::new(),
         }
@@ -96,6 +98,7 @@ pub struct Hw {
     /// Did the auto-boost policy (not the user) switch boost on?
     ours: bool,
     pub button: bool,
+    pub service: bool,
     /// Last hardware-button result, reported in the status bar.
     pub event: String,
 }
@@ -124,6 +127,7 @@ impl Hw {
             model,
             ours: false,
             button: false,
+            service: false,
             event: String::new(),
         }
     }
@@ -144,6 +148,7 @@ impl Hw {
             custom: self.cfg.custom,
             auto_boost: self.cfg.auto_boost_above,
             button: self.button,
+            service: self.service,
             event: self.event.clone(),
             ..Default::default()
         };
@@ -247,17 +252,25 @@ impl Hw {
         }
     }
 
-    /// Edit the Custom preset (the stock ones are read-only): validated, saved, and re-applied
-    /// if Custom is the active profile.
-    pub fn adjust_custom(&mut self, field: Field, delta: i16) -> Result<String, String> {
+    /// Set one value of the Custom preset (the stock ones are read-only). PL1 <= PL2 is kept by
+    /// moving the other limit along. Validated, saved, and re-applied if Custom is active.
+    pub fn set_custom(&mut self, field: Field, value: u8) -> Result<String, String> {
         let mut p = self.cfg.custom;
-        let bump = |v: u8| u8::try_from((i16::from(v) + delta).clamp(0, 255)).unwrap_or(v);
         match field {
-            Field::Pl1 => p.pl1 = bump(p.pl1),
-            Field::Pl2 => p.pl2 = bump(p.pl2),
-            Field::Ctgp => p.ctgp = bump(p.ctgp),
+            Field::Pl1 => {
+                p.pl1 = value;
+                p.pl2 = p.pl2.max(value);
+            }
+            Field::Pl2 => {
+                p.pl2 = value;
+                p.pl1 = p.pl1.min(value);
+            }
+            Field::Ctgp => p.ctgp = value,
         }
         p.validate()?;
+        if p == self.cfg.custom {
+            return Ok("custom preset unchanged".into());
+        }
         let (stock, old) = (self.stock, self.cfg.custom);
         let was_active = self.ec().ok().and_then(|ec| control::current(ec, &stock, &old).ok().flatten()) == Some(Profile::Custom);
         self.cfg.custom = p;
@@ -265,7 +278,7 @@ impl Hw {
         if was_active {
             return self.set_profile(Profile::Custom);
         }
-        Ok(format!("custom preset saved: PL1 {} W / PL2 {} W / cTGP +{} W", p.pl1, p.pl2, p.ctgp))
+        Ok(format!("custom preset: PL1 {} W / PL2 {} W / cTGP +{} W", p.pl1, p.pl2, p.ctgp))
     }
 
     pub fn set_boost(&mut self, on: bool) -> Result<String, String> {
