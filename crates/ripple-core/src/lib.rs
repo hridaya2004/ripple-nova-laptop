@@ -11,6 +11,7 @@
 //!
 //! No hardware access lives here — that is `ripple-hw`'s job.
 
+pub mod fan;
 pub mod modes;
 pub mod protocol;
 pub mod regs;
