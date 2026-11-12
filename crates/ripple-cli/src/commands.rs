@@ -634,6 +634,13 @@ fn watch(cli: &Cli) -> CmdResult {
     let stock = control::stock(Some(ec.as_mut()));
     let cfg = Config::load();
     let mut key = control::open_mode_key()?;
+    let _lock = match control::follow_lock(false) {
+        Some(l) => l,
+        None => {
+            eprintln!("another process (the GUI?) follows the button, waiting for it to exit");
+            control::follow_lock(true).ok_or("could not take the button lock")?
+        }
+    };
     // bring the button's lights in line with the limits that are already in force
     if let Some(p) = control::current(ec.as_mut(), &stock, &cfg.custom)? {
         control::set_mode_byte(ec.as_mut(), p)?;

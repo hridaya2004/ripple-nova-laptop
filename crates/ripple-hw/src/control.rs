@@ -367,6 +367,25 @@ pub fn auto_boost_action(threshold: Option<u8>, temp_c: f64, boosted: bool, ours
 
 // ---------------------------------------------------------------- mode button
 
+/// Only one process should follow the mode button (two would each cycle the profile). Followers
+/// hold this lock for as long as they follow: the daemon (`rcc watch`) waits for it, the GUI only
+/// tries, and stays out of the way when the daemon already holds it.
+const FOLLOW_LOCK: &str = "/run/ripple-nova-button.lock";
+
+pub fn follow_lock(blocking: bool) -> Option<std::fs::File> {
+    follow_lock_at(std::path::Path::new(FOLLOW_LOCK), blocking)
+}
+
+fn follow_lock_at(path: &std::path::Path, blocking: bool) -> Option<std::fs::File> {
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).ok()?;
+    if blocking {
+        f.lock().ok()?;
+    } else {
+        f.try_lock().ok()?;
+    }
+    Some(f)
+}
+
 /// Open the "Uniwill WMI hotkeys" input device (root only).
 pub fn open_mode_key() -> HwResult<std::fs::File> {
     for e in std::fs::read_dir("/sys/class/input")?.flatten() {
@@ -447,6 +466,16 @@ mod tests {
         assert_eq!(kb_from_8bit((255, 255, 255)), (50, 50, 50));
         assert_eq!(kb_from_8bit((0, 0, 0)), (0, 0, 0));
         assert_eq!(kb_from_8bit((255, 0, 128)), (50, 0, 25));
+    }
+
+    #[test]
+    fn only_one_process_can_follow_the_button() {
+        let path = std::env::temp_dir().join(format!("ripple-follow-test-{}", std::process::id()));
+        let first = follow_lock_at(&path, false).expect("free lock");
+        assert!(follow_lock_at(&path, false).is_none(), "second follower must be refused");
+        drop(first);
+        assert!(follow_lock_at(&path, false).is_some(), "released lock can be taken again");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
