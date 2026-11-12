@@ -150,6 +150,15 @@ pub mod fan_table {
 }
 
 /// Convert a percent duty (0–100) to the EC's 0–200 scale.
+/// Is `addr` inside a documented register range?
+///
+/// Ranges: battery info/status/alerts/cycle (1026–1200), the EC control
+/// block (1840–2031: fans, power, RGB, identity, charge) and the RAM fan
+/// curve tables (3840–4095). Writes outside need `--force` (safety rule 2).
+pub fn is_known(addr: u16) -> bool {
+    matches!(addr, 1026..=1200 | 1840..=2031 | 3840..=4095)
+}
+
 pub fn duty_to_ec(percent: u8) -> u8 {
     percent.min(100).saturating_mul(2)
 }
