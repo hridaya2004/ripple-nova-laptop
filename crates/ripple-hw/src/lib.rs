@@ -2,14 +2,15 @@
 //!
 //! * [`EcAccess`] — the trait every backend implements (byte r/w with pacing,
 //!   read-before-write and retry safety rules).
-//! * [`MockEc`] — in-memory backend for development & tests.
-//! * `AcpiCallEc` / `WmiEc` — Linux backends (behind the `linux` module).
+//! * `AcpiCallEc` / `WmiEc` / `SysfsEc` — Linux backends (`linux` module).
+//! * [`require_root`] — every real hardware path needs root.
 
-pub mod mock;
+#[cfg(target_os = "linux")]
+pub mod control;
 #[cfg(target_os = "linux")]
 pub mod linux;
-
-pub use mock::MockEc;
+#[cfg(test)]
+mod mock;
 
 use std::time::Duration;
 
@@ -89,5 +90,51 @@ pub trait EcAccess: Send {
             )));
         }
         Ok(())
+    }
+}
+
+/// Effective uid out of `/proc/self/status` (`Uid: real effective saved fs`).
+fn euid_from_status(status: &str) -> Option<u32> {
+    let line = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Hardware access (`/proc/acpi/call`, sysfs writes) only works as root, so
+/// both binaries call this right after argument parsing (`--help` still works).
+///
+/// shortcut: the suggested command repeats the args unquoted, quote them by
+/// hand if one contains spaces.
+pub fn require_root(gui: bool) -> Result<(), String> {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    if euid_from_status(&status) == Some(0) {
+        return Ok(());
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<path to this binary>".into());
+    let args = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    // sudo drops the display env a GUI needs; keep it, but not HOME (-E would).
+    let env = if gui {
+        "--preserve-env=WAYLAND_DISPLAY,XDG_RUNTIME_DIR,DISPLAY,XAUTHORITY "
+    } else {
+        ""
+    };
+    Err(format!(
+        "must be run as root (EC access via /proc/acpi/call and sysfs).\n\
+         run:  sudo {env}{}",
+        format!("{exe} {args}").trim_end()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn euid_is_the_second_uid_field() {
+        let st = "Name:\tx\nUid:\t1000\t0\t0\t0\nGid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(euid_from_status(st), Some(0));
+        assert_eq!(euid_from_status("Uid:\t0\t1000\t0\t0\n"), Some(1000));
+        assert_eq!(euid_from_status(""), None);
     }
 }

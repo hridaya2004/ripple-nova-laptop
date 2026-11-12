@@ -18,11 +18,60 @@ use ripple_core::protocol;
 /// Existence + parseability of a read is all discovery needs.
 const PROBE_ADDR: u64 = 1856;
 
+// ---------------------------------------------------------------- open/detect
+
+/// Best available EC backend: `acpi_call`, then WMI. No fake fallback.
+pub fn open_auto() -> HwResult<Box<dyn EcAccess>> {
+    let acpi = match AcpiCallEc::probe() {
+        Ok(ec) => return Ok(Box::new(ec)),
+        Err(e) => e,
+    };
+    match WmiEc::probe() {
+        Ok(ec) => Ok(Box::new(ec)),
+        Err(wmi) => Err(HwError::Unavailable(format!(
+            "no EC backend (acpi: {acpi}; wmi: {wmi}) — run `rcc doctor`"
+        ))),
+    }
+}
+
+/// Model from the EC project id (primary) plus the DMI strings (hint only).
+pub fn detect_model(ec: Option<&mut (dyn EcAccess + '_)>) -> ripple_core::model::Model {
+    let ec_id = ec.and_then(|e| e.read(ripple_core::regs::addr::PROJECT_ID).ok());
+    let dmi: Vec<String> = [
+        "product_name",
+        "product_family",
+        "product_sku",
+        "board_name",
+        "board_version",
+        "bios_version",
+    ]
+    .iter()
+    .filter_map(|f| std::fs::read_to_string(format!("/sys/class/dmi/id/{f}")).ok())
+    .map(|s| s.trim().to_string())
+    .collect();
+    ripple_core::model::detect(ec_id, &dmi)
+}
+
 // ---------------------------------------------------------------- acpi_call
+
+/// `/proc/acpi/call` keeps one global result buffer, so a write+read pair from one process
+/// can be answered with another process's result (CLI while the GUI polls). Serialise the
+/// pair across processes. Best effort: no lock file, no lock.
+fn ec_lock() -> Option<std::fs::File> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open("/run/ripple-nova-ec.lock")
+        .ok()?;
+    f.lock().ok()?;
+    Some(f)
+}
 
 /// Write `method arg...` to `/proc/acpi/call` and parse the result.
 fn acpi_call_raw(method: &str, args: &[u64]) -> HwResult<u64> {
     use std::io::Write;
+    let _lock = ec_lock();
 
     let mut payload = String::from(method);
     for a in args {
@@ -174,9 +223,7 @@ fn discover_method(candidates: &[String], method: &str, args: &[u64]) -> HwResul
                 tried.push(format!("{full} ({e})"));
             }
             Err(e) => {
-                // Other ACPI errors (AE_ERROR_TYPE…) still mean "method
-                // resolved but refused" — treat as found for discovery, but
-                // record it in case nothing else works.
+                // Any other ACPI error: not a usable method, keep looking.
                 tried.push(format!("{full} ({e})"));
             }
         }
@@ -497,9 +544,8 @@ impl SysfsEc {
             "hwmon {}",
             self.hwmon.file_name().unwrap_or_default().to_string_lossy()
         ));
-        match self.lightbar() {
-            Ok(_) => bits.push("lightbar LED".into()),
-            Err(_) => {}
+        if self.lightbar().is_ok() {
+            bits.push("lightbar LED".into());
         }
         if self.charge_types().is_ok() {
             bits.push("charge_types".into());
@@ -515,78 +561,63 @@ impl SysfsEc {
         bits.join(", ")
     }
 
-    /// Read all hwmon sensors (temps, fan RPMs, pwm duty).
+    /// Read all hwmon sensors (temps, fan RPMs, pwm duty), each ordered by its hwmon index
+    /// so `fans[i]` and `pwms[i]` describe the same fan.
     pub fn sensors(&self) -> HwResult<Sensors> {
-        let mut s = Sensors::default();
-        let rd = std::fs::read_dir(&self.hwmon)
-            .map_err(|e| map_io(e, &self.hwmon))?;
+        let rd = std::fs::read_dir(&self.hwmon).map_err(|e| map_io(e, &self.hwmon))?;
+        let (mut temps, mut fans, mut pwms) = (Vec::new(), Vec::new(), Vec::new());
+        let label = |kind: &str, idx: u32| {
+            std::fs::read_to_string(self.hwmon.join(format!("{kind}{idx}_label")))
+                .map(|l| l.trim().to_string())
+                .unwrap_or_else(|_| format!("{kind}{idx}"))
+        };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if let Some(idx) = name.strip_prefix("temp").and_then(|r| r.strip_suffix("_input"))
-            {
-                if let Ok(v) = std::fs::read_to_string(e.path()) {
-                    let mv: i32 = v.trim().parse().unwrap_or(0);
-                    let label = std::fs::read_to_string(
-                        self.hwmon.join(format!("temp{idx}_label")),
-                    )
-                    .map(|l| l.trim().to_string())
-                    .unwrap_or_else(|_| format!("temp{idx}"));
-                    s.temps.push((label, mv));
+            let read = |p: &std::path::Path| std::fs::read_to_string(p).ok().and_then(|v| v.trim().parse::<i64>().ok());
+            if let Some(idx) = name.strip_prefix("temp").and_then(|r| r.strip_suffix("_input")).and_then(|i| i.parse::<u32>().ok()) {
+                if let Some(mv) = read(&e.path()) {
+                    temps.push((idx, label("temp", idx), mv as i32));
                 }
-            } else if let Some(idx) =
-                name.strip_prefix("fan").and_then(|r| r.strip_suffix("_input"))
-            {
-                if let Ok(v) = std::fs::read_to_string(e.path()) {
-                    let rpm: u32 = v.trim().parse().unwrap_or(0);
-                    let label = std::fs::read_to_string(
-                        self.hwmon.join(format!("fan{idx}_label")),
-                    )
-                    .map(|l| l.trim().to_string())
-                    .unwrap_or_else(|_| format!("fan{idx}"));
-                    s.fans.push((label, rpm));
+            } else if let Some(idx) = name.strip_prefix("fan").and_then(|r| r.strip_suffix("_input")).and_then(|i| i.parse::<u32>().ok()) {
+                if let Some(rpm) = read(&e.path()) {
+                    fans.push((idx, label("fan", idx), rpm as u32));
                 }
-            } else if let Some(idx) = name.strip_prefix("pwm") {
-                if idx.chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(v) = std::fs::read_to_string(e.path()) {
-                        s.pwms.push(v.trim().parse().unwrap_or(0));
-                    }
+            } else if let Some(idx) = name.strip_prefix("pwm").and_then(|i| i.parse::<u32>().ok()) {
+                if let Some(v) = read(&e.path()) {
+                    pwms.push((idx, v.clamp(0, 255) as u8));
                 }
             }
         }
-        s.temps.sort();
-        s.fans.sort();
-        Ok(s)
+        temps.sort_by_key(|t| t.0);
+        fans.sort_by_key(|t| t.0);
+        pwms.sort_by_key(|t| t.0);
+        Ok(Sensors {
+            temps: temps.into_iter().map(|(_, l, v)| (l, v)).collect(),
+            fans: fans.into_iter().map(|(_, l, v)| (l, v)).collect(),
+            pwms: pwms.into_iter().map(|(_, v)| v).collect(),
+        })
     }
 
     // ------------------------------------------------------------ lightbar
 
-    /// The lightbar LED device (`uniwill:*:status` with `multi_intensity`).
+    /// The lightbar LED device: a uniwill multicolor LED (`uniwill:*:status` preferred).
+    /// Never any other driver's LED that merely has `multi_intensity`.
     fn lightbar_dir(&self) -> HwResult<std::path::PathBuf> {
-        let rd = std::fs::read_dir("/sys/class/leds")
-            .map_err(|e| HwError::Other(format!("leds: {e}")))?;
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.contains("uniwill")
-                && name.contains("status")
-                && p.join("multi_intensity").exists()
-            {
-                return Ok(p);
-            }
-        }
-        // any uniwill multicolor LED (some kernels name it differently)
-        for e in std::fs::read_dir("/sys/class/leds")
-            .map_err(|e| HwError::Other(format!("leds: {e}")))?
+        let rd = std::fs::read_dir("/sys/class/leds").map_err(|e| HwError::Other(format!("leds: {e}")))?;
+        let mut found: Vec<(bool, std::path::PathBuf)> = rd
             .flatten()
-        {
-            let p = e.path();
-            if p.join("multi_intensity").exists() {
-                return Ok(p);
-            }
-        }
-        Err(HwError::Unavailable(
-            "no uniwill multicolor LED (lightbar) found".into(),
-        ))
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                (name.contains("uniwill") && e.path().join("multi_intensity").exists())
+                    .then(|| (name.contains("status"), e.path()))
+            })
+            .collect();
+        found.sort_by_key(|(status, _)| !*status);
+        found
+            .into_iter()
+            .next()
+            .map(|(_, p)| p)
+            .ok_or_else(|| HwError::Unavailable("no uniwill multicolor LED (lightbar) found".into()))
     }
 
     /// Current lightbar state: `(r, g, b, brightness)`.

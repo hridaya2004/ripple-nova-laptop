@@ -1,10 +1,13 @@
 [package]
 name = "ripple-hw"
-description = "Hardware abstraction: EcAccess trait + backends (mock, acpi_call, wmi, sysfs, hidraw)"
+description = "Hardware abstraction: EcAccess trait + backends (acpi_call, wmi, sysfs, hidraw)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
 ripple-core = { path = "../ripple-core" }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

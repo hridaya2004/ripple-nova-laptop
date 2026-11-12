@@ -1,10 +1,9 @@
-//! In-memory EC backend for development and tests.
+//! In-memory EC fake, compiled for unit tests only (never shipped in a binary).
 
 use crate::{EcAccess, HwError, HwResult};
 use std::collections::BTreeMap;
 
-/// Simple map-backed EC. Pre-populate with known register values to simulate
-/// a machine (see `mock::samples::ph4` for a canned PH4-like image).
+/// Simple map-backed EC used to test the `EcAccess` default methods.
 #[derive(Debug, Default, Clone)]
 pub struct MockEc {
     mem: BTreeMap<u16, u8>,
@@ -22,14 +21,6 @@ impl MockEc {
         let mut ec = Self::new();
         ec.mem.insert(addr, value);
         ec
-    }
-
-    pub fn set(&mut self, addr: u16, value: u8) {
-        self.mem.insert(addr, value);
-    }
-
-    pub fn image(&self) -> &BTreeMap<u16, u8> {
-        &self.mem
     }
 }
 
@@ -51,41 +42,6 @@ impl EcAccess for MockEc {
         }
         self.mem.insert(addr, value);
         Ok(())
-    }
-}
-
-/// Canned register images for tests / `rcc status --mock`.
-pub mod samples {
-    use super::MockEc;
-    use ripple_core::regs::{addr, fan_table};
-
-    /// A plausible PH4-like machine: gaming mode, some RPM, charge limit 80.
-    pub fn ph4() -> MockEc {
-        let mut ec = MockEc::new();
-        ec.set(addr::PROJECT_ID, 0x01); // low byte of 5889 (PH4ARxx) — see doctor
-        ec.set(addr::MAFAN_CONTROL_BYTE, 0x00);
-        // duty 0–200 scale
-        ec.set(addr::MAIN_FAN_L_DUTY, 120);
-        ec.set(addr::MAIN_FAN_R_DUTY, 118);
-        // RPM (arbitrary plausible values, little-endian-ish)
-        ec.set(addr::MAIN_FAN_RPM1, 0x60);
-        ec.set(addr::MAIN_FAN_RPM2, 0x0F); // 0x0F60 = 3936
-        ec.set(addr::SECOND_FAN_RPM1, 0x20);
-        ec.set(addr::SECOND_FAN_RPM2, 0x0E);
-        // power limits
-        ec.set(addr::PL1_SETTING, 45);
-        ec.set(addr::PL2_SETTING, 60);
-        // battery
-        ec.set(addr::BATTERY_CHARGE_LIMIT_UP, 80);
-        ec.set(addr::BATTERY_CHARGE_LIMIT_DOWN, 75);
-        // a small fan curve in RAM
-        for i in 0..16u16 {
-            let v_up: u8 = if i == 0 { 0 } else { (40 + i * 3) as u8 };
-            let v_duty: u8 = if i == 0 { 0 } else { (i * 8) as u8 };
-            ec.set(fan_table::CPU_TEMP_UP + i, v_up);
-            ec.set(fan_table::CPU_DUTY + i, v_duty);
-        }
-        ec
     }
 }
 

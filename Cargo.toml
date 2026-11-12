@@ -5,6 +5,8 @@ members = ["crates/ripple-core", "crates/ripple-hw", "crates/ripple-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# File::lock (cross-process EC lock) needs 1.89
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/local/ripple-nova"
 
