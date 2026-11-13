@@ -664,6 +664,56 @@ fn cpu_gpu_temps(s: &crate::linux::Sensors) -> (Option<f64>, Option<f64>) {
     (by("CPU", 0), by("GPU", 1))
 }
 
+/// The platform toggles that are plain 0/1 (Fn lock, ...), as `(name, on)`. `ctgp_offset` belongs to the
+/// profiles, `touchpad_toggle_enable` gates a feature that does nothing here, and the lightbar animations
+/// are meaningless without a lightbar.
+pub fn platform_toggles(u: &SysfsEc, has_lightbar: bool) -> Vec<(&'static str, bool)> {
+    u.platform_attrs()
+        .into_iter()
+        .filter(|(n, _)| !matches!(*n, "ctgp_offset" | "touchpad_toggle_enable"))
+        .filter(|(n, _)| has_lightbar || !matches!(*n, "rainbow_animation" | "breathing_in_suspend"))
+        .filter_map(|(n, v)| match v.as_deref() {
+            Some("1") => Some((n, true)),
+            Some("0") => Some((n, false)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the popups look at right now.
+pub fn observed(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, stock: &[Preset; 3], cfg: &Config) -> crate::notify::Observed {
+    crate::notify::Observed {
+        profile: current(ec, stock, &cfg.custom).ok().flatten(),
+        pl: ec.read(addr::PL1_SETTING).ok().zip(ec.read(addr::PL2_SETTING).ok()),
+        // with the custom fan profile on, bit 6 is its manual bit, not a boost
+        boosted: !cfg.fan.enabled && ec.read(addr::MAFAN_CONTROL_BYTE).is_ok_and(is_boosted),
+        toggles: sysfs.map(|u| platform_toggles(u, has_lightbar(ec))).unwrap_or_default(),
+    }
+}
+
+/// The popup loop (the daemon runs it in a thread, so popups work with no window open): once a second,
+/// look at the profile, fan boost and toggles, and pop up what changed when "Show popup" is on.
+pub fn popup_loop(stop: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut ec = match crate::linux::open_auto() {
+        Ok(ec) => ec,
+        Err(e) => return eprintln!("popups: {e}"),
+    };
+    let sysfs = SysfsEc::probe().ok();
+    let stock = stock(Some(ec.as_mut()));
+    let mut notifier = crate::notify::Notifier::default();
+    while !stop.load(Relaxed) {
+        let cfg = Config::load();
+        let changes = notifier.observe(&observed(ec.as_mut(), sysfs.as_ref(), &stock, &cfg));
+        if !changes.is_empty() && crate::notify::popups_enabled() {
+            for (title, body) in changes {
+                crate::notify::send_to_logged_in(&title, &body);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
 /// The engine's main loop (the daemon runs it in a thread): every tick, read the saved profile and
 /// the sensors and drive the fans. Without the uniwill hwmon driver there are no sensors to go by,
 /// so the fans stay with the firmware. Hands the fans back when `stop` is set.

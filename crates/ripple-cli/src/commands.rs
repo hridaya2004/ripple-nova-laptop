@@ -7,7 +7,6 @@ use ripple_core::modes::OperatingMode;
 use ripple_core::regs::{addr, duty_from_ec};
 use ripple_core::rgb::RgbRegState;
 use ripple_hw::control::{self, Config, Hsv, Preset, Profile};
-use ripple_hw::notify;
 use ripple_hw::{EcAccess, HwError};
 
 use crate::{
@@ -637,6 +636,8 @@ fn watch(cli: &Cli) -> CmdResult {
     // lock below: it must not wait for a GUI that holds it.
     static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     std::thread::spawn(|| control::fan_loop(&NEVER));
+    // Popups for profile / fan boost / toggle changes, whoever makes them: the daemon is always there.
+    std::thread::spawn(|| control::popup_loop(&NEVER));
     let mut key = control::open_mode_key()?;
     let _lock = match control::follow_lock(false) {
         Some(l) => l,
@@ -649,17 +650,8 @@ fn watch(cli: &Cli) -> CmdResult {
     loop {
         control::wait_mode_key(&mut key)?;
         let cur = control::current(ec.as_mut(), &stock, &cfg.custom)?;
-        let next = Profile::after_button(cur);
-        match apply_profile(ec.as_mut(), cli, &stock, &cfg, next) {
-            Ok(()) => {
-                // The window announces changes itself while it is open; with no window, the daemon does
-                // (it is the only one that saw the press).
-                if !notify::gui_running() && notify::popups_enabled() {
-                    let pr = preset_of(&stock, &cfg, next);
-                    notify::send_to_logged_in("Performance profile", &format!("{}: PL1 {} W / PL2 {} W", next.name(), pr.pl1, pr.pl2));
-                }
-            }
-            Err(e) => eprintln!("error: {e}"), // keep watching, a failed press must not kill the daemon
+        if let Err(e) = apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur)) {
+            eprintln!("error: {e}"); // keep watching, a failed press must not kill the daemon
         }
     }
 }
