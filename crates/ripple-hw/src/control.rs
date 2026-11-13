@@ -1,4 +1,4 @@
-//! Profile (Office/Gaming/Turbo), fan boost and mode-button handling shared by
+//! Profile (Balanced/Enthusiast/Overboost), fan boost and mode-button handling shared by
 //! `rcc` and `rcc-gui`. Everything here was verified on real hardware:
 //! PL1/PL2 via EC 1923/1924 (35→55→65 W measured as package power under
 //! load), fan boost via the 0x40 bit of EC 1873, mode button = WMI event 176 =
@@ -58,12 +58,25 @@ pub enum Profile {
 }
 
 impl Profile {
+    /// The names the Windows app shows (our `OperatingMode` Office/Gaming/Turbo, same three lights).
     pub fn name(self) -> &'static str {
         match self {
-            Self::Stock(OperatingMode::Office) => "Office",
-            Self::Stock(OperatingMode::Gaming) => "Gaming",
-            Self::Stock(OperatingMode::Turbo) => "Turbo",
+            Self::Stock(OperatingMode::Office) => "Balanced",
+            Self::Stock(OperatingMode::Gaming) => "Enthusiast",
+            Self::Stock(OperatingMode::Turbo) => "Overboost",
             Self::Custom => "Custom",
+        }
+    }
+
+    /// Inverse of `mode_nibble`: the profile the EC's own mode byte announces. `None` for nibbles
+    /// with no known meaning (0x4 is fan boost; 0x2 and 0x8 were seen before an app took control).
+    pub fn from_mode_byte(byte: u8) -> Option<Self> {
+        match byte >> 4 {
+            // 0xE and 0x7 are Balanced and Overboost with the custom fan engine's manual bit on top
+            0xA | 0xE => Some(Self::Stock(OperatingMode::Office)),
+            0x0 => Some(Self::Stock(OperatingMode::Gaming)),
+            0x3 | 0x7 => Some(Self::Stock(OperatingMode::Turbo)),
+            _ => None,
         }
     }
 
@@ -163,7 +176,8 @@ impl Hsv {
     }
 }
 
-fn default_custom() -> Preset {
+/// The custom performance profile preset as shipped (what "reset" goes back to).
+pub fn default_custom() -> Preset {
     // between Office and Gaming, so the first Custom is a gentle step, not a copy of a stock one
     Preset { pl1: 45, pl2: 45, ctgp: 0 }
 }
@@ -190,7 +204,7 @@ impl Config {
         let mut cfg = std::fs::read_to_string(Self::PATH)
             .ok()
             .and_then(|t| serde_json::from_str::<Self>(&t).ok())
-            .unwrap_or(Self { custom: default_custom(), keyboard: None, auto_boost_above: None });
+            .unwrap_or(Self { custom: default_custom(), keyboard: None, auto_boost_above: None, fan: FanCurves::default(), keyboard_level: None });
         if cfg.custom.validate().is_err() {
             cfg.custom = default_custom();
         }
@@ -229,16 +243,41 @@ pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwRes
 }
 
 /// Which profile the EC is running, judged by its PL1/PL2 setting registers. Stock profiles win
-/// over Custom when both match.
+/// over Custom when both match. Both registers read 0 until something applies limits (fresh boot,
+/// or the EC still in the state Windows left it): then the EC runs its own profile and its mode
+/// byte (the button's lights) says which, so the profile is read from there.
 pub fn current(ec: &mut dyn EcAccess, stock: &[Preset; 3], custom: &Preset) -> HwResult<Option<Profile>> {
     let now = (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?);
     let hit = |p: &Preset| (p.pl1, p.pl2) == now;
-    Ok(STOCK_MODES
+    let by_limits = STOCK_MODES
         .into_iter()
         .zip(stock)
         .find(|(_, p)| hit(p))
         .map(|(m, _)| Profile::Stock(m))
-        .or_else(|| hit(custom).then_some(Profile::Custom)))
+        .or_else(|| hit(custom).then_some(Profile::Custom));
+    if by_limits.is_some() || now != (0, 0) {
+        return Ok(by_limits);
+    }
+    Ok(Profile::from_mode_byte(ec.read(addr::MAFAN_CONTROL_BYTE)?))
+}
+
+pub fn preset_for(stock: &[Preset; 3], custom: &Preset, p: Profile) -> Preset {
+    match p {
+        Profile::Stock(m) => stock[m as usize],
+        Profile::Custom => *custom,
+    }
+}
+
+/// Start-up sync (daemon and GUI): find the profile the EC is running, write its limits when none
+/// are set yet (so the EC enforces what the UI shows, as the stock Windows service does on boot),
+/// and put the button's lights on it.
+pub fn adopt(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, stock: &[Preset; 3], custom: &Preset) -> HwResult<Option<Profile>> {
+    let Some(p) = current(ec, stock, custom)? else { return Ok(None) };
+    if (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?) == (0, 0) {
+        apply(ec, sysfs, preset_for(stock, custom, p))?;
+    }
+    set_mode_byte(ec, p)?;
+    Ok(Some(p))
 }
 
 /// Does the EC report a lightbar? (`SupportByteOneFlag` bit 6, the stock app's
@@ -520,6 +559,196 @@ mod tests {
         let custom = Preset { pl1: 35, pl2: 35, ctgp: 5 }; // same limits as Office
         assert_eq!(current(&mut Fake(35, 35), &st, &custom).unwrap(), Some(Profile::Stock(OperatingMode::Office)));
         assert_eq!(current(&mut Fake(45, 45), &st, &Preset { pl1: 45, pl2: 45, ctgp: 0 }).unwrap(), Some(Profile::Custom));
-        assert_eq!(current(&mut Fake(0, 0), &st, &custom).unwrap(), None);
+        assert_eq!(current(&mut Fake(50, 50), &st, &custom).unwrap(), None);
+    }
+
+    fn ec_with(pl: (u8, u8), mode_byte: u8) -> crate::mock::MockEc {
+        let mut ec = crate::mock::MockEc::new();
+        ec.write(addr::PL1_SETTING, pl.0).unwrap();
+        ec.write(addr::PL2_SETTING, pl.1).unwrap();
+        ec.write(addr::MAFAN_CONTROL_BYTE, mode_byte).unwrap();
+        ec
+    }
+
+    #[test]
+    fn curves_interpolate_and_clamp() {
+        let c = [20, 30, 45, 70, 100];
+        assert_eq!(curve_duty(&c, 30.0), 20); // below the first anchor: flat
+        assert_eq!(curve_duty(&c, 45.0), 20);
+        assert_eq!(curve_duty(&c, 50.0), 25); // halfway 20 -> 30
+        assert_eq!(curve_duty(&c, 75.0), 70);
+        assert_eq!(curve_duty(&c, 80.0), 85);
+        assert_eq!(curve_duty(&c, 120.0), 100); // above the last: flat
+        assert_eq!(fan_smooth(50, 80), 80); // up at once
+        assert_eq!(fan_smooth(80, 20), 78); // down by 2 per tick
+        assert_eq!(fan_smooth(21, 20), 20);
+    }
+
+    #[test]
+    fn setting_a_point_keeps_the_curve_rising() {
+        let mut c = [20, 30, 45, 70, 100];
+        set_curve_point(&mut c, 2, 80); // up: later points follow
+        assert_eq!(c, [20, 30, 80, 80, 100]);
+        set_curve_point(&mut c, 2, 10); // down: earlier points follow
+        assert_eq!(c, [10, 10, 10, 80, 100]);
+        set_curve_point(&mut c, 4, 0);
+        assert_eq!(c, [0, 0, 0, 0, 0]);
+        // a curve that lets the fans stop at 85 °C is refused
+        assert!(FanCurves { cpu: c, ..FanCurves::default() }.validate().is_err());
+        assert!(FanCurves { gpu: [0, 0, 0, 0, 59], ..FanCurves::default() }.validate().is_err());
+        assert!(FanCurves { gpu: [0, 0, 0, 0, 60], ..FanCurves::default() }.validate().is_ok());
+    }
+
+    #[test]
+    fn fan_targets_fail_safe() {
+        let cfg = FanCurves::default();
+        assert_eq!(fan_targets(&cfg, Some(45.0), Some(45.0)), [20, 0]);
+        assert_eq!(fan_targets(&cfg, Some(89.0), Some(40.0))[0], curve_duty(&cfg.cpu, 89.0));
+        assert_eq!(fan_targets(&cfg, Some(90.0), Some(40.0)), [100, 100]); // either sensor hot
+        assert_eq!(fan_targets(&cfg, Some(40.0), Some(95.0)), [100, 100]);
+        assert_eq!(fan_targets(&cfg, None, Some(65.0)), [curve_duty(&cfg.cpu, 65.0), curve_duty(&cfg.gpu, 65.0)]);
+        assert_eq!(fan_targets(&cfg, None, None), [100, 100]); // blind = flat out
+        assert!(FanCurves::default().validate().is_ok());
+        assert!(FanCurves { cpu: [20, 30, 25, 70, 100], ..FanCurves::default() }.validate().is_err());
+        assert!(FanCurves { gpu: [0, 25, 40, 65, 101], ..FanCurves::default() }.validate().is_err());
+    }
+
+    /// A mock EC with the two fan duty registers.
+    struct FanEc(crate::mock::MockEc, [u8; 2]);
+    impl EcAccess for FanEc {
+        fn name(&self) -> &str { "fan-mock" }
+        fn read(&mut self, a: u16) -> HwResult<u8> { self.0.read(a) }
+        fn write(&mut self, a: u16, v: u8) -> HwResult<()> { self.0.write(a, v) }
+        fn fan_duty(&mut self, f: u8) -> HwResult<u8> { Ok(self.1[usize::from(f) - 1]) }
+        fn set_fan_duty(&mut self, f: u8, d: u8) -> HwResult<()> { self.1[usize::from(f) - 1] = d; Ok(()) }
+    }
+
+    #[test]
+    fn engine_takes_over_on_top_of_the_mode_and_hands_back() {
+        let mut ec = FanEc(crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0xA7), [60, 0]); // Balanced
+        let cfg = FanCurves { enabled: true, ..FanCurves::default() };
+        let mut eng = FanEngine { settle: std::time::Duration::ZERO, ..FanEngine::default() };
+        eng.tick(&mut ec, &cfg, Some(65.0), Some(65.0)).unwrap();
+        assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0xE7); // mode nibble kept, manual bit on
+        // at 65 °C the curves say 45 % (CPU) and 40 % (GPU): both above what the firmware ran, so at once
+        assert_eq!(ec.1, [duty_to_ec(45), duty_to_ec(40)]);
+        // a hot GPU alone pushes both fans to the top at once
+        eng.tick(&mut ec, &cfg, Some(60.0), Some(91.0)).unwrap();
+        assert_eq!(ec.1, [200, 200]);
+        // the mode button dropping bit 6 is repaired on the next tick
+        ec.write(addr::MAFAN_CONTROL_BYTE, 0x37).unwrap();
+        eng.tick(&mut ec, &cfg, Some(60.0), Some(60.0)).unwrap();
+        assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x77);
+        // switched off: the firmware gets the fans back, mode intact
+        eng.tick(&mut ec, &FanCurves::default(), Some(60.0), Some(60.0)).unwrap();
+        assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x37);
+    }
+
+    #[test]
+    fn mode_byte_only_keeps_the_manual_bit_the_engine_set() {
+        use OperatingMode::*;
+        let run = |cur: u8, p: Profile, on: bool| {
+            let mut ec = crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, cur);
+            set_mode_byte_with(&mut ec, p, on).unwrap();
+            ec.read(addr::MAFAN_CONTROL_BYTE).unwrap()
+        };
+        // the profile being on must not create the bit: the engine never sees its own mark otherwise
+        // and would take the byte for a user's boost (boot: byte 0x07, adopt writes the mode byte)
+        assert_eq!(run(0x07, Profile::Stock(Gaming), true), 0x07);
+        assert_eq!(run(0xA7, Profile::Stock(Turbo), true), 0x37);
+        // a bit the engine set stays through a mode change
+        assert_eq!(run(0xE7, Profile::Stock(Gaming), true), 0x47);
+        assert_eq!(run(0x47, Profile::Stock(Turbo), true), 0x77);
+        assert_eq!(run(0x77, Profile::Stock(Office), true), 0xE7);
+        // profile off: plain mode change
+        assert_eq!(run(0xA7, Profile::Stock(Gaming), false), 0x07);
+    }
+
+    #[test]
+    fn engine_leaves_a_users_boost_alone() {
+        let mut ec = FanEc(crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0x40), [200, 200]);
+        let cfg = FanCurves { enabled: true, ..FanCurves::default() };
+        let mut eng = FanEngine { settle: std::time::Duration::ZERO, ..FanEngine::default() };
+        eng.tick(&mut ec, &cfg, Some(40.0), Some(40.0)).unwrap();
+        assert_eq!((ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), ec.1), (0x40, [200, 200]));
+        eng.stop(&mut ec).unwrap(); // not ours: nothing is released
+        assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x40);
+    }
+
+    #[test]
+    fn rainbow_is_a_sticky_bit_that_a_colour_clears() {
+        let mut ec = crate::mock::MockEc::with(addr::TRIGGER_BYTE, 0x00);
+        set_keyboard_rainbow(&mut ec, true).unwrap();
+        assert_eq!(ec.read(addr::TRIGGER_BYTE).unwrap(), 0xA0); // rainbow + apply
+        assert!(keyboard_rainbow(&mut ec).unwrap());
+        set_keyboard_rgb(&mut ec, (1, 2, 3)).unwrap();
+        assert_eq!(ec.read(addr::TRIGGER_BYTE).unwrap(), 0x20); // rainbow gone, apply set
+        assert!(!keyboard_rainbow(&mut ec).unwrap());
+        // other trigger bits survive both writes
+        let mut ec = crate::mock::MockEc::with(addr::TRIGGER_BYTE, 0x01);
+        set_keyboard_rainbow(&mut ec, true).unwrap();
+        set_keyboard_rainbow(&mut ec, false).unwrap();
+        assert_eq!(ec.read(addr::TRIGGER_BYTE).unwrap(), 0x21);
+    }
+
+    #[test]
+    fn backlight_off_and_back_on() {
+        let mut ec = crate::mock::MockEc::with(KB_STATUS, 0x88); // level 4, turbo bits set
+        assert_eq!(keyboard_backlight(&mut ec).unwrap(), 4);
+        assert_eq!(keyboard_off(&mut ec).unwrap(), 4);
+        assert_eq!(keyboard_backlight(&mut ec).unwrap(), 0);
+        assert_eq!(ec.read(KB_STATUS).unwrap(), 0x18); // level 0, apply, other bits kept
+        keyboard_on(&mut ec, Some(2)).unwrap();
+        assert_eq!(keyboard_backlight(&mut ec).unwrap(), 2);
+        keyboard_on(&mut ec, Some(4)).unwrap(); // already on: untouched
+        assert_eq!(keyboard_backlight(&mut ec).unwrap(), 2);
+        keyboard_off(&mut ec).unwrap();
+        keyboard_on(&mut ec, None).unwrap(); // unknown level: full
+        assert_eq!(keyboard_backlight(&mut ec).unwrap(), 4);
+        // a power-off bit left by the EC is cleared by a write
+        let mut ec = crate::mock::MockEc::with(KB_STATUS, 0x02);
+        set_keyboard_backlight(&mut ec, 3).unwrap();
+        assert_eq!(ec.read(KB_STATUS).unwrap(), 0x70);
+    }
+
+    #[test]
+    fn keyboard_choice_follows_the_ec_when_it_changed() {
+        let saved = Hsv { h: 0, s: 100, v: 50 }; // dim red: levels (25, 0, 0)
+        assert_eq!(keyboard_choice(Some(saved), Some((25, 0, 0))), Some(saved));
+        assert_eq!(keyboard_choice(Some(saved), Some((0, 0, 50))), Some(Hsv::from_levels((0, 0, 50))));
+        assert_eq!(keyboard_choice(Some(saved), None), Some(saved));
+        assert_eq!(keyboard_choice(None, None), None);
+    }
+
+    #[test]
+    fn boot_state_is_read_from_the_mode_byte() {
+        use OperatingMode::*;
+        let st = stock(None);
+        let custom = Preset { pl1: 45, pl2: 45, ctgp: 0 };
+        let cur = |pl, byte| current(&mut ec_with(pl, byte), &st, &custom).unwrap();
+        // measured right after a boot on the real machine: PL regs 0/0, mode byte 0x00 (1 light)
+        assert_eq!(cur((0, 0), 0x00), Some(Profile::Stock(Gaming)));
+        assert_eq!(cur((0, 0), 0xA7), Some(Profile::Stock(Office)));
+        assert_eq!(cur((0, 0), 0x37), Some(Profile::Stock(Turbo)));
+        // fan boost (0x4_) and nibbles with no known meaning stay unknown
+        assert_eq!(cur((0, 0), 0x47), None);
+        assert_eq!(cur((0, 0), 0x20), None);
+        // set limits that match nothing are not second-guessed by the lights
+        assert_eq!(cur((50, 50), 0xA7), None);
+    }
+
+    #[test]
+    fn adopt_writes_the_limits_of_the_profile_the_lights_show() {
+        let st = stock(None);
+        let custom = Preset { pl1: 45, pl2: 45, ctgp: 0 };
+        let mut ec = ec_with((0, 0), 0x07);
+        let p = adopt(&mut ec, None, &st, &custom).unwrap();
+        assert_eq!(p, Some(Profile::Stock(OperatingMode::Gaming)));
+        assert_eq!((ec.read(addr::PL1_SETTING).unwrap(), ec.read(addr::PL2_SETTING).unwrap()), (55, 55));
+        assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x07); // lights untouched
+        // limits that are already set are left alone
+        let mut ec = ec_with((45, 45), 0x07);
+        assert_eq!(adopt(&mut ec, None, &st, &custom).unwrap(), Some(Profile::Custom));
+        assert_eq!(ec.read(addr::PL1_SETTING).unwrap(), 45);
     }
 }
