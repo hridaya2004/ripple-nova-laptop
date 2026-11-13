@@ -193,3 +193,74 @@ fn main() {
         std::thread::sleep(Duration::from_secs(10));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `(ticked index, header label)` of the profile part of the menu.
+    fn profile_menu(profile: Option<&str>) -> (usize, String) {
+        let tray = RippleTray {
+            profile: profile.map(String::from),
+        };
+        let items = tray.menu();
+        let selected = items
+            .iter()
+            .find_map(|i| match i {
+                MenuItem::RadioGroup(g) => Some(g.selected),
+                _ => None,
+            })
+            .expect("a radio group");
+        let header = items
+            .iter()
+            .find_map(|i| match i {
+                MenuItem::Standard(s) if s.label.starts_with("Performance profile") => {
+                    Some(s.label.clone())
+                }
+                _ => None,
+            })
+            .expect("a header");
+        (selected, header)
+    }
+
+    #[test]
+    fn the_menu_ticks_the_published_profile() {
+        for (i, (name, _)) in PROFILES.iter().enumerate() {
+            assert_eq!(
+                profile_menu(Some(name)),
+                (i, "Performance profile".to_string())
+            );
+        }
+        // the user's Custom preset ticks none of the three and says so
+        assert_eq!(
+            profile_menu(Some("custom")),
+            (usize::MAX, "Performance profile: Custom".to_string())
+        );
+        assert_eq!(profile_menu(Some("unknown")).0, usize::MAX);
+        // no daemon: nothing ticked, and the header says why
+        assert_eq!(
+            profile_menu(None),
+            (
+                usize::MAX,
+                "Performance profile (service not running)".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_stale_file_means_no_daemon() {
+        let path = std::env::temp_dir().join(format!("ripple-tray-test-{}", std::process::id()));
+        std::fs::write(&path, "gaming\n").unwrap();
+        assert_eq!(read_profile(&path).as_deref(), Some("gaming"));
+        let old = std::time::SystemTime::now() - Duration::from_secs(30);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(read_profile(&path), None);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read_profile(&path), None);
+    }
+}
