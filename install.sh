@@ -39,6 +39,8 @@ uninstall() {
         "$DESTDIR$BINDIR/rcc" "$DESTDIR$BINDIR/rcc-gui" "$DESTDIR$BINDIR/ripple-nova" \
         "$DESTDIR/etc/systemd/system/$UNIT" \
         "$DESTDIR$PREFIX/share/applications/ripple-nova.desktop" \
+        "$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps/ripple-nova.svg" \
+        "$DESTDIR/etc/sudoers.d/ripple-nova" \
         "$DESTDIR/etc/modules-load.d/ripple-nova.conf" \
         "$DESTDIR/etc/xdg/autostart/ripple-nova.desktop"
     $SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"   # the app's own open-at-login copy
@@ -85,12 +87,14 @@ $SUDO install -Dm755 target/release/rcc "$DESTDIR$BINDIR/rcc"
 $SUDO install -Dm755 target/release/rcc-gui "$DESTDIR$BINDIR/rcc-gui"
 $SUDO install -Dm755 "$tmp/launcher" "$DESTDIR$BINDIR/ripple-nova"
 $SUDO install -Dm644 dist/ripple-nova.desktop "$DESTDIR$PREFIX/share/applications/ripple-nova.desktop"
+$SUDO install -Dm644 dist/ripple-nova.svg "$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps/ripple-nova.svg"
 $SUDO install -Dm644 "$tmp/unit" "$DESTDIR/etc/systemd/system/$UNIT"
 $SUDO install -Dm644 dist/modules-load.conf "$DESTDIR/etc/modules-load.d/ripple-nova.conf"
 $SUDO install -dm755 "$DESTDIR/etc/ripple-nova"
 
 if live; then
     command -v update-desktop-database >/dev/null && $SUDO update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
+    command -v gtk-update-icon-cache >/dev/null && $SUDO gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
     say "starting the daemon"
     $SUDO modprobe acpi_call 2>/dev/null || true
     $SUDO modprobe uniwill-laptop 2>/dev/null || true

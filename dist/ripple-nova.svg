@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Ripple Control Center</title>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="46%" r="75%">
+      <stop offset="0" stop-color="#0d2226"/>
+      <stop offset="1" stop-color="#03090b"/>
+    </radialGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#46f0d6"/>
+      <stop offset="1" stop-color="#0f8f80"/>
+    </linearGradient>
+    <linearGradient id="streak" x1="0" x2="1">
+      <stop offset="0" stop-color="#46f0d6" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#8ffff0" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#46f0d6" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2.2"/>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+  <!-- light streaks across the glow -->
+  <rect x="14" y="123" width="228" height="2.2" fill="url(#streak)" opacity="0.8"/>
+  <rect x="58" y="96" width="140" height="1.2" fill="url(#streak)" opacity="0.45" transform="rotate(-12 128 128)"/>
+  <rect x="48" y="154" width="160" height="1.2" fill="url(#streak)" opacity="0.4" transform="rotate(-12 128 128)"/>
+  <!-- the ring, tilted in perspective -->
+  <g transform="translate(128 128) rotate(-24) scale(1 0.84)">
+    <circle r="86" fill="none" stroke="#2fe8cd" stroke-width="13" filter="url(#glow)" opacity="0.85"/>
+    <circle r="86" fill="#04100f" stroke="#46f0d6" stroke-width="6"/>
+    <circle r="86" fill="none" stroke="#c8fff7" stroke-width="1.6" opacity="0.8"/>
+    <circle r="77" fill="none" stroke="#139a8a" stroke-width="2.4"/>
+    <g filter="url(#soft)" opacity="0.55"><path d="M26.72,3.86 L73.93,3.23 L65.64,34.17 L24.19,11.99 Z" fill="url(#blade)" opacity="0.95"/><path d="M21.21,16.71 L62.41,39.76 L39.76,62.41 L14.96,22.48 Z" fill="url(#blade)" opacity="0.62"/><path d="M10.01,25.07 L34.17,65.64 L3.23,73.93 L1.72,26.95 Z" fill="url(#blade)" opacity="0.95"/><path d="M-3.86,26.72 L-3.23,73.93 L-34.17,65.64 L-11.99,24.19 Z" fill="url(#blade)" opacity="0.62"/><path d="M-16.71,21.21 L-39.76,62.41 L-62.41,39.76 L-22.48,14.96 Z" fill="url(#blade)" opacity="0.95"/><path d="M-25.07,10.01 L-65.64,34.17 L-73.93,3.23 L-26.95,1.72 Z" fill="url(#blade)" opacity="0.62"/><path d="M-26.72,-3.86 L-73.93,-3.23 L-65.64,-34.17 L-24.19,-11.99 Z" fill="url(#blade)" opacity="0.95"/><path d="M-21.21,-16.71 L-62.41,-39.76 L-39.76,-62.41 L-14.96,-22.48 Z" fill="url(#blade)" opacity="0.62"/><path d="M-10.01,-25.07 L-34.17,-65.64 L-3.23,-73.93 L-1.72,-26.95 Z" fill="url(#blade)" opacity="0.95"/><path d="M3.86,-26.72 L3.23,-73.93 L34.17,-65.64 L11.99,-24.19 Z" fill="url(#blade)" opacity="0.62"/><path d="M16.71,-21.21 L39.76,-62.41 L62.41,-39.76 L22.48,-14.96 Z" fill="url(#blade)" opacity="0.95"/><path d="M25.07,-10.01 L65.64,-34.17 L73.93,-3.23 L26.95,-1.72 Z" fill="url(#blade)" opacity="0.62"/></g>
+    <path d="M26.72,3.86 L73.93,3.23 L65.64,34.17 L24.19,11.99 Z" fill="url(#blade)" opacity="0.95"/><path d="M21.21,16.71 L62.41,39.76 L39.76,62.41 L14.96,22.48 Z" fill="url(#blade)" opacity="0.62"/><path d="M10.01,25.07 L34.17,65.64 L3.23,73.93 L1.72,26.95 Z" fill="url(#blade)" opacity="0.95"/><path d="M-3.86,26.72 L-3.23,73.93 L-34.17,65.64 L-11.99,24.19 Z" fill="url(#blade)" opacity="0.62"/><path d="M-16.71,21.21 L-39.76,62.41 L-62.41,39.76 L-22.48,14.96 Z" fill="url(#blade)" opacity="0.95"/><path d="M-25.07,10.01 L-65.64,34.17 L-73.93,3.23 L-26.95,1.72 Z" fill="url(#blade)" opacity="0.62"/><path d="M-26.72,-3.86 L-73.93,-3.23 L-65.64,-34.17 L-24.19,-11.99 Z" fill="url(#blade)" opacity="0.95"/><path d="M-21.21,-16.71 L-62.41,-39.76 L-39.76,-62.41 L-14.96,-22.48 Z" fill="url(#blade)" opacity="0.62"/><path d="M-10.01,-25.07 L-34.17,-65.64 L-3.23,-73.93 L-1.72,-26.95 Z" fill="url(#blade)" opacity="0.95"/><path d="M3.86,-26.72 L3.23,-73.93 L34.17,-65.64 L11.99,-24.19 Z" fill="url(#blade)" opacity="0.62"/><path d="M16.71,-21.21 L39.76,-62.41 L62.41,-39.76 L22.48,-14.96 Z" fill="url(#blade)" opacity="0.95"/><path d="M25.07,-10.01 L65.64,-34.17 L73.93,-3.23 L26.95,-1.72 Z" fill="url(#blade)" opacity="0.62"/>
+    <circle r="25" fill="#010504" stroke="#2fe8cd" stroke-width="2.2"/>
+    <circle r="25" fill="none" stroke="#2fe8cd" stroke-width="5" filter="url(#soft)" opacity="0.6"/>
+  </g>
+</svg>
