@@ -2,13 +2,15 @@
 # Build and install Ripple Control Center.
 #
 #   ./install.sh              build (as you), install with sudo, enable and start the root daemon
+#   ./install.sh --no-sudoers same, without the passwordless-window rule (the window then asks polkit)
 #   ./install.sh --uninstall  remove everything this script installed
 #   DESTDIR=/dir ./install.sh stage the files under /dir, touching neither the system nor systemd
 #
-# Installs: rcc and rcc-gui (PREFIX/bin, default /usr/local), `ripple-nova` (opens the GUI as root
-# through polkit) + a menu entry, the systemd service ripple-nova.service (runs `rcc watch` as root:
-# follows the mode button and keeps the profile and the button lights in sync), and the module list
-# that loads acpi_call and uniwill-laptop at boot.
+# Installs: rcc and rcc-gui (PREFIX/bin, default /usr/local), `ripple-nova` (opens the GUI as root:
+# without a password through a sudoers rule that allows exactly rcc-gui for you, else through polkit)
+# + a menu entry and icon, the systemd service ripple-nova.service (runs `rcc watch` as root: follows
+# the mode button, keeps the profile and the button lights in sync, runs the custom fan profile), and
+# the module list that loads acpi_call and uniwill-laptop at boot.
 set -euo pipefail
 
 PREFIX=${PREFIX:-/usr/local}
@@ -52,7 +54,12 @@ if [ "${1:-}" = "--uninstall" ]; then
     uninstall
     exit 0
 fi
-[ $# -eq 0 ] || die "usage: ./install.sh [--uninstall]"
+SUDOERS=1
+if [ "${1:-}" = "--no-sudoers" ]; then
+    SUDOERS=0
+    shift
+fi
+[ $# -eq 0 ] || die "usage: ./install.sh [--no-sudoers | --uninstall]"
 
 # ---- prerequisites
 if live; then
@@ -92,6 +99,23 @@ $SUDO install -Dm644 "$tmp/unit" "$DESTDIR/etc/systemd/system/$UNIT"
 $SUDO install -Dm644 dist/modules-load.conf "$DESTDIR/etc/modules-load.d/ripple-nova.conf"
 $SUDO install -dm755 "$DESTDIR/etc/ripple-nova"
 
+# Passwordless window: a sudoers rule for exactly rcc-gui (see dist/ripple-nova.sudoers). Checked with
+# visudo first: a broken file in /etc/sudoers.d would lock everybody out of sudo.
+PASSWORDLESS=0
+if [ "$SUDOERS" = 1 ]; then
+    who=${SUDO_USER:-$(id -un)}
+    if [ "$who" = root ]; then
+        warn "running as root without SUDO_USER: no sudoers rule written (the window asks polkit)"
+    else
+        sed "s|@BINDIR@|$BINDIR|g; s|@USER@|$who|g" dist/ripple-nova.sudoers > "$tmp/sudoers"
+        if live; then
+            $SUDO visudo -cf "$tmp/sudoers" >/dev/null || die "the generated sudoers rule does not parse; nothing was written to /etc/sudoers.d"
+        fi
+        $SUDO install -Dm440 "$tmp/sudoers" "$DESTDIR/etc/sudoers.d/ripple-nova"
+        PASSWORDLESS=1
+    fi
+fi
+
 if live; then
     command -v update-desktop-database >/dev/null && $SUDO update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
     command -v gtk-update-icon-cache >/dev/null && $SUDO gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
@@ -109,11 +133,16 @@ if live; then
     fi
 fi
 
+if [ "$PASSWORDLESS" = 1 ]; then
+    window="opens without a password (/etc/sudoers.d/ripple-nova allows only $BINDIR/rcc-gui)"
+else
+    window="asks for your password (polkit)"
+fi
 cat <<MSG
 
 Installed.
   daemon   ripple-nova.service (root), follows the mode button   journalctl -u $UNIT
-  window   ripple-nova   (menu: Ripple Control Center), asks for your password
+  window   ripple-nova   (menu: Ripple Control Center), $window
   cli      sudo rcc doctor | status | mode get|set|next
   remove   ./install.sh --uninstall
 MSG
