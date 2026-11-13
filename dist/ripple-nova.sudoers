@@ -9,4 +9,6 @@ Cmnd_Alias RIPPLE_GUI = @BINDIR@/rcc-gui ""
 Defaults!RIPPLE_GUI env_keep += "WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XAUTHORITY"
 # the touchpad switch, so a keyboard shortcut can bring the touchpad back when there is no pointer to click with
 Cmnd_Alias RIPPLE_TOUCHPAD = @BINDIR@/rcc touchpad on, @BINDIR@/rcc touchpad off, @BINDIR@/rcc touchpad toggle
-@USER@ ALL=(root) NOPASSWD: RIPPLE_GUI, RIPPLE_TOUCHPAD
+# the tray icon's performance profile shortcut: the three stock profiles, no Custom, no other argument
+Cmnd_Alias RIPPLE_MODE = @BINDIR@/rcc mode set balanced, @BINDIR@/rcc mode set enthusiast, @BINDIR@/rcc mode set overboost
+@USER@ ALL=(root) NOPASSWD: RIPPLE_GUI, RIPPLE_TOUCHPAD, RIPPLE_MODE

@@ -193,7 +193,7 @@ if live; then
 fi
 
 if [ "$PASSWORDLESS" = 1 ]; then
-    window="opens without a password (/etc/sudoers.d/ripple-nova allows only $BINDIR/rcc-gui)"
+    window="opens without a password (/etc/sudoers.d/ripple-nova allows only $BINDIR/rcc-gui and a few exact rcc commands)"
 else
     window="asks for your password (polkit)"
 fi
@@ -202,7 +202,8 @@ cat <<MSG
 Installed.
   daemon   ripple-nova.service (root), follows the mode button   journalctl -u $UNIT
   window   ripple-nova   (menu: Ripple Control Center), $window
-  tray     rcc-tray (autostarts at login). GNOME shows it only with the AppIndicator extension:
+  tray     rcc-tray (autostarts at login, the only thing that does; its menu switches the performance profile).
+           GNOME shows it only with the AppIndicator extension:
            sudo pacman -S gnome-shell-extension-appindicator, then log out and in
   cli      sudo rcc doctor | status | mode get|set|next
   remove   ./install.sh --uninstall

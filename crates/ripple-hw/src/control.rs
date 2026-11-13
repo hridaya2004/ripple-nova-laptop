@@ -883,8 +883,26 @@ pub fn observed(
     }
 }
 
+/// Where the daemon publishes the profile it sees, as a lowercase name (`balanced`, `enthusiast`, `overboost`,
+/// `custom`, `unknown`), rewritten every second. World-readable: the tray icon runs as the desktop user, cannot
+/// read the EC, and treats a file older than a few seconds as "the daemon is not running".
+pub const PROFILE_FILE: &str = "/run/ripple-nova-profile";
+
+fn publish_profile(path: &std::path::Path, p: Option<Profile>) {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = path.with_extension("tmp");
+    // written aside and renamed, so a reader never sees half a file
+    let _ = std::fs::write(
+        &tmp,
+        p.map_or("unknown".into(), |p| p.name().to_lowercase()),
+    )
+    .and_then(|()| std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)))
+    .and_then(|()| std::fs::rename(&tmp, path));
+}
+
 /// The popup loop (the daemon runs it in a thread, so popups work with no window open): once a second,
-/// look at the profile, fan boost and toggles, and pop up what changed when "Show popup" is on.
+/// look at the profile, fan boost and toggles, and pop up what changed when "Show popup" is on. The profile
+/// is also published for the tray icon (`PROFILE_FILE`).
 pub fn popup_loop(stop: &std::sync::atomic::AtomicBool) {
     use std::sync::atomic::Ordering::Relaxed;
     let mut ec = match crate::linux::open_auto() {
@@ -896,7 +914,9 @@ pub fn popup_loop(stop: &std::sync::atomic::AtomicBool) {
     let mut notifier = crate::notify::Notifier::default();
     while !stop.load(Relaxed) {
         let cfg = Config::load();
-        let changes = notifier.observe(&observed(ec.as_mut(), sysfs.as_ref(), &stock, &cfg));
+        let seen = observed(ec.as_mut(), sysfs.as_ref(), &stock, &cfg);
+        publish_profile(std::path::Path::new(PROFILE_FILE), seen.profile);
+        let changes = notifier.observe(&seen);
         if !changes.is_empty() && crate::notify::popups_enabled() {
             for (title, body) in changes {
                 crate::notify::send_to_logged_in(&title, &body);
@@ -1413,6 +1433,30 @@ mod tests {
             crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0x47),
             [0, 200],
         );
+        // a stopped fan is 0 %, not what hwmon's reported duty says in manual mode
+        assert_eq!(manual_duties(&mut ec, 0x47), Some([Some(0), Some(100)]));
+        // the firmware's own curve: hwmon's number is the right one
+        assert_eq!(manual_duties(&mut ec, 0xA7), None);
+        // no WMI duty access: no number rather than a wrong one
+        let mut plain = crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0x47);
+        assert_eq!(manual_duties(&mut plain, 0x47), Some([None, None]));
+    }
+
+    #[test]
+    fn the_published_profile_is_a_plain_readable_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("ripple-profile-test-{}", std::process::id()));
+        publish_profile(&path, Some(Profile::Stock(OperatingMode::Office)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "balanced");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        publish_profile(&path, Some(Profile::Custom));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "custom");
+        publish_profile(&path, None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "unknown");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
