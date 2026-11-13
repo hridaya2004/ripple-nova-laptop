@@ -7,14 +7,13 @@
 
 mod autostart;
 mod hw;
-mod notify;
+mod remote;
 mod settings;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +22,8 @@ use gpui::{
     Context, Div, ElementId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ResizeEdge, SharedString, Stateful,
     TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
-use hw::{toggle_label, FanMode, Field, Hw, Snapshot, PROFILES};
+use hw::{FanMode, Field, Hw, Snapshot, PROFILES};
+use ripple_hw::notify::toggle_label;
 use ripple_core::modes::OperatingMode;
 use ripple_hw::control::{self, Hsv, Preset, Profile};
 use settings::Settings;
@@ -90,6 +90,7 @@ impl Palette {
 /// `rcc-gui [--tab profiles|fan|keyboard|system|settings] [--open] [--light] [--size WxH] [--minimized]`:
 /// where to start (handy for screenshots; `--light` forces the light theme for this run).
 /// `rcc-gui --autostart on|off|status` installs/removes/shows the open-at-login entry and exits.
+#[derive(Clone, Copy)]
 struct Start {
     tab: Tab,
     open: bool,
@@ -168,28 +169,15 @@ fn step_at(x: f32, left: f32, width: f32, n: usize) -> usize {
     (frac * (n - 1) as f32).round() as usize
 }
 
-/// What outlives the window: the hardware, the latest snapshot and the popup logic. A closed or hidden
-/// window must not stop the popups or the auto-boost policy, so a background thread polls (see `main`)
+/// The hardware and the latest snapshot. A background thread polls (this also runs the auto-boost policy)
 /// and the window only reads `latest`.
 struct Shared {
     hw: Arc<Mutex<Hw>>,
     snap: Mutex<Snapshot>,
-    /// Turns snapshot differences into desktop popups.
-    notifier: Mutex<notify::Notifier>,
-    /// The "Show popup" setting.
-    popups: AtomicBool,
 }
 
 impl Shared {
-    /// A new snapshot (from the poller or from a click): report what changed since the last one, once,
-    /// whoever caused it, and keep it as the latest.
     fn publish(&self, snap: Snapshot) {
-        let changes = self.notifier.lock().unwrap_or_else(|e| e.into_inner()).observe(&snap);
-        if self.popups.load(Ordering::Relaxed) {
-            for (title, body) in changes {
-                notify::send(&title, &body);
-            }
-        }
         *self.snap.lock().unwrap_or_else(|e| e.into_inner()) = snap;
     }
 
@@ -236,7 +224,6 @@ impl Ui {
         settings.light |= start.light;
         let font_scroll = UniformListScrollHandle::new();
         font_scroll.scroll_to_item(0, ScrollStrategy::Top);
-        shared.popups.store(settings.popups, Ordering::Relaxed);
         Self {
             hw,
             snap: shared.latest(),
@@ -1090,7 +1077,6 @@ impl Ui {
                 .child(div().child("Show popup").child(note(p, "Notify when a toggle, the performance profile or fan boost changes.")))
                 .child(button(p, "popup-toggle", if popups { "On" } else { "Off" }, popups).on_click(cx.listener(|ui, _, _, cx| {
                     ui.settings.popups = !ui.settings.popups;
-                    ui.shared.popups.store(ui.settings.popups, Ordering::Relaxed);
                     ui.save_settings(cx);
                 }))),
         );
@@ -1269,7 +1255,7 @@ impl Ui {
                     .child(button(p, "start-min", if self.settings.start_minimized { "On" } else { "Off" }, self.settings.start_minimized).on_click(cx.listener(|ui, _, _, cx| ui.toggle_start_minimized(cx))))
                     .child("Start minimized"),
             )
-            .child(note(p, "Open at login starts the window at login (no password: the sudoers rule from install.sh, else polkit asks). Start minimized keeps it out of the way until you open it."));
+            .child(note(p, "Open at login starts the window at login (no password: the sudoers rule from install.sh, else polkit asks). Start minimized starts it minimized, out of the way until you open it (dash, or the tray icon)."));
 
         div().flex().flex_col().gap_3().child(theme).child(font).child(startup).into_any_element()
     }
@@ -1359,11 +1345,26 @@ fn spawn_mode_button(hw: Arc<Mutex<Hw>>) {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--show` / `--quit` talk to the running window as the desktop user, so they come before the root gate
+    // (the launcher and the tray use them).
+    if let Some(verb) = args.iter().find_map(|a| match a.as_str() {
+        "--show" => Some("show"),
+        "--quit" => Some("quit"),
+        _ => None,
+    }) {
+        match remote::ask(verb) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("Ripple Control Center is not running ({e})");
+                std::process::exit(1);
+            }
+        }
+    }
     if let Err(e) = ripple_hw::require_root(true) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(cmd) = args.iter().position(|a| a == "--autostart").and_then(|i| args.get(i + 1)) {
         let layout = autostart::Layout::system();
         let res = match cmd.as_str() {
@@ -1398,9 +1399,9 @@ fn main() {
     let shared = Arc::new(Shared {
         hw: hw.clone(),
         snap: Mutex::new(Snapshot::default()),
-        notifier: Mutex::new(notify::Notifier::default()),
-        popups: AtomicBool::new(Settings::load().popups),
     });
+    // The control socket (after the instance lock, so a stale one is ours to replace).
+    let commands = remote::listen().map_err(|e| eprintln!("warning: control socket: {e}")).ok();
     // The poller (also runs the auto-boost policy) lives as long as the process, window or not.
     let poller = shared.clone();
     std::thread::spawn(move || loop {
@@ -1409,39 +1410,69 @@ fn main() {
         std::thread::sleep(Duration::from_secs(1));
     });
     let start = Start::from_args();
-    let minimized = start.minimized;
     Application::new().run(move |cx: &mut App| {
+        // gpui stops its event loop when the last window closes (measured on Wayland), so closing the window
+        // ends the process: the popups live in the daemon, the tray icon in its own helper.
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
             }
         })
         .detach();
-        let (w, h) = start.size.unwrap_or((860., 640.));
-        let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Ripple Control Center".into()),
-                    appears_transparent: true,
-                    traffic_light_position: None,
-                }),
-                window_decorations: Some(WindowDecorations::Client),
-                window_min_size: Some(size(px(640.), px(460.))),
-                app_id: Some("ripple-nova".into()),
-                ..Default::default()
-            },
-            move |window, cx| {
-                if minimized {
-                    window.minimize_window();
-                }
-                cx.new(|cx| Ui::new(shared, start, cx))
-            },
-        )
-        .unwrap();
+        open_main_window(cx, shared.clone(), start); // --minimized: the window starts minimized
         cx.activate(true);
+        // Whoever lives in the user's session (the tray, the launcher) can ask the window to come forward or close.
+        if let Some(commands) = commands {
+            cx.spawn(async move |cx| loop {
+                while let Ok(cmd) = commands.try_recv() {
+                    let alive = cx.update(|cx| match cmd {
+                        remote::Cmd::Quit => cx.quit(),
+                        remote::Cmd::Show => show_window(cx),
+                    });
+                    if alive.is_err() {
+                        return; // the app is gone
+                    }
+                }
+                cx.background_executor().timer(Duration::from_millis(150)).await;
+            })
+            .detach();
+        }
     });
+}
+
+fn open_main_window(cx: &mut App, shared: Arc<Shared>, start: Start) {
+    let minimized = start.minimized;
+    let (w, h) = start.size.unwrap_or((860., 640.));
+    let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Ripple Control Center".into()),
+                appears_transparent: true,
+                traffic_light_position: None,
+            }),
+            window_decorations: Some(WindowDecorations::Client),
+            window_min_size: Some(size(px(640.), px(460.))),
+            app_id: Some("ripple-nova".into()),
+            ..Default::default()
+        },
+        move |window, cx| {
+            if minimized {
+                window.minimize_window();
+            }
+            cx.new(|cx| Ui::new(shared, start, cx))
+        },
+    )
+    .unwrap();
+}
+
+/// `show`: bring the window forward (measured on native Wayland: it comes up in front, focused).
+fn show_window(cx: &mut App) {
+    if let Some(window) = cx.windows().first().copied() {
+        let _ = window.update(cx, |_, window, _| window.activate_window());
+    }
+    cx.activate(true);
 }
 
 #[cfg(test)]

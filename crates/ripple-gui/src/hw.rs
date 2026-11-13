@@ -112,19 +112,6 @@ pub struct Hw {
     pub event: String,
 }
 
-/// How a platform toggle is named in the window and in popups.
-pub fn toggle_label(name: &str) -> &str {
-    match name {
-        "fn_lock" => "Fn lock",
-        "super_key_enable" => "Super key",
-        "rainbow_animation" => "Lightbar rainbow",
-        "breathing_in_suspend" => "Lightbar breathing",
-        "ac_auto_boost" => "AC Auto-Boot",
-        "usb_powershare_high" => "USB powershare",
-        other => other,
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FanMode {
     Auto,
@@ -224,17 +211,7 @@ impl Hw {
             // Only plain 0/1 attributes become toggles; `ctgp_offset` belongs to the profiles, and
             // the lightbar animations are meaningless without a lightbar. `touchpad_toggle_enable`
             // had no visible effect here (removed on request until it is understood).
-            s.toggles = u
-                .platform_attrs()
-                .into_iter()
-                .filter(|(n, _)| !matches!(*n, "ctgp_offset" | "touchpad_toggle_enable"))
-                .filter(|(n, _)| s.has_lightbar || !matches!(*n, "rainbow_animation" | "breathing_in_suspend"))
-                .filter_map(|(n, v)| match v.as_deref() {
-                    Some("1") => Some((n, true)),
-                    Some("0") => Some((n, false)),
-                    _ => None,
-                })
-                .collect();
+            s.toggles = control::platform_toggles(u, s.has_lightbar);
         }
         s
     }

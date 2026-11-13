@@ -2,10 +2,10 @@
 # Opens the Ripple Control Center window. It needs root for the EC: without a password through sudo
 # when install.sh set up its sudoers rule, otherwise through polkit (a password prompt).
 lock=/run/ripple-nova-gui.lock
-# Already running? Then do not start a second root GUI (it would double every popup), and do not ask
-# for anything. The running window can be brought back from the dash.
+# Already running (maybe hidden in the background)? Never start a second root GUI (it would double every
+# popup) and never ask for a password: hand over to the running one, which shows its window.
 if [ -e "$lock" ] && ! flock -n "$lock" true 2>/dev/null; then
-	exit 0
+	exec @BINDIR@/rcc-gui --show
 fi
 if sudo -n -l @BINDIR@/rcc-gui >/dev/null 2>&1; then
 	exec sudo -n @BINDIR@/rcc-gui "$@"
