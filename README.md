@@ -236,15 +236,17 @@ sudo ./target/debug/rcc doctor       # run the debug build as root (there is no 
 
 Layout: `crates/ripple-core` (register map, protocol, parsers), `crates/ripple-hw` (EC backends, profiles, fan
 engine, popups), `crates/ripple-cli` (`rcc`), `crates/ripple-gui` (`rcc-gui`), `crates/ripple-tray` (`rcc-tray`),
-`dist/` (service, launcher, sudoers, icon, desktop entries), `vendor/` (patched `xattr` for GPUI, `uniwill-laptop`
-subtree).
+`dist/` (service, launcher, sudoers, icon, desktop entries), `vendor/` (the `uniwill-laptop` subtree).
+
+`Cargo.lock` keeps `libc` at 0.2.189 on purpose: GPUI pulls in `xattr` 0.2.3, which needs `libc::ENOATTR`, and libc
+0.2.190 removed it on Linux. Do not run `cargo update -p libc` until GPUI moves to a newer `xattr`.
 
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
 
-Two vendored parts are not covered by that and keep their own licenses: `vendor/uniwill-laptop` (the kernel driver,
-GPL-2.0) and `vendor/xattr` (a patched copy of the `xattr` crate, with its own `LICENSE-MIT` and `LICENSE-APACHE`).
+The vendored kernel driver `vendor/uniwill-laptop` is not covered by that: it keeps its own licence, GPL-2.0
+(`vendor/uniwill-laptop/LICENSE`).
 
 ## Thanks
 

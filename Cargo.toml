@@ -18,6 +18,6 @@ clap = { version = "4", features = ["derive", "env"] }
 [profile.dev]
 debug = 1
 
-# gpui -> zed-async-tar -> xattr 0.2.3 doesn't compile against current libc (no ENOATTR on Linux).
-[patch.crates-io]
-xattr = { path = "vendor/xattr" }
+# Cargo.lock keeps libc at 0.2.189 on purpose. gpui -> gpui_http_client -> zed-async-tar needs xattr 0.2.3,
+# which uses libc::ENOATTR, and libc 0.2.190 removed that on Linux. Do not `cargo update -p libc` until gpui
+# moves to xattr >= 1 (the build then fails with "cannot find value `ENOATTR` in crate `libc`").
