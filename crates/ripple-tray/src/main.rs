@@ -72,15 +72,18 @@ impl Tray for RippleTray {
 
 fn main() {
     // `assume_sni_available`: no tray host yet (the GNOME extension loads later, or after a re-login) is
-    // not an error; the icon appears when one shows up.
-    let handle = match RippleTray.assume_sni_available(true).spawn() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("rcc-tray: {e}");
-            std::process::exit(1);
+    // not an error; the icon appears when one shows up. If the service ever ends (or cannot start), try again:
+    // the icon is meant to be always there; "Quit" is the only way out.
+    loop {
+        match RippleTray.assume_sni_available(true).spawn() {
+            Ok(handle) => {
+                while !handle.is_closed() {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                eprintln!("rcc-tray: the tray service ended, starting it again");
+            }
+            Err(e) => eprintln!("rcc-tray: {e}"),
         }
-    };
-    while !handle.is_closed() {
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        std::thread::sleep(std::time::Duration::from_secs(10));
     }
 }
