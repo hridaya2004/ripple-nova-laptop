@@ -100,6 +100,11 @@ struct Start {
 }
 
 impl Start {
+    /// A window opened later (by `show`): the defaults.
+    fn plain() -> Self {
+        Self { tab: Tab::Profiles, open: false, light: false, size: None, minimized: false }
+    }
+
     fn from_args() -> Self {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let tab = match args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).map(String::as_str) {
@@ -1423,11 +1428,13 @@ fn main() {
         cx.activate(true);
         // Whoever lives in the user's session (the tray, the launcher) can ask the window to come forward or close.
         if let Some(commands) = commands {
+            let shared = shared.clone();
             cx.spawn(async move |cx| loop {
                 while let Ok(cmd) = commands.try_recv() {
+                    let shared = shared.clone();
                     let alive = cx.update(|cx| match cmd {
                         remote::Cmd::Quit => cx.quit(),
-                        remote::Cmd::Show => show_window(cx),
+                        remote::Cmd::Show => show_window(cx, shared),
                     });
                     if alive.is_err() {
                         return; // the app is gone
@@ -1467,10 +1474,19 @@ fn open_main_window(cx: &mut App, shared: Arc<Shared>, start: Start) {
     .unwrap();
 }
 
-/// `show`: bring the window forward (measured on native Wayland: it comes up in front, focused).
-fn show_window(cx: &mut App) {
-    if let Some(window) = cx.windows().first().copied() {
-        let _ = window.update(cx, |_, window, _| window.activate_window());
+/// `show` (the tray click, the menu launcher): get a usable window in front of the user. Measured on native
+/// Wayland: `activate_window` on a *minimized* window does nothing (GNOME only posts a "... is ready"
+/// notice) and a client cannot un-minimize itself. So a window that is not the active one is replaced by a
+/// fresh one. The new window opens first: gpui stops the whole event loop when the window count hits zero.
+fn show_window(cx: &mut App, shared: Arc<Shared>) {
+    let old = cx.windows();
+    let active = old.iter().any(|w| w.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false));
+    if active {
+        return;
+    }
+    open_main_window(cx, shared, Start::plain());
+    for w in old {
+        let _ = w.update(cx, |_, window, _| window.remove_window());
     }
     cx.activate(true);
 }
