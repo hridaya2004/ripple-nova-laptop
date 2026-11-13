@@ -59,7 +59,8 @@ on a real laptop.
   The window starts the tray icon too, and so does login when *Open at login* is on.
 - **Popups** (any freedesktop notification daemon): when the profile, fan boost or a toggle changes, whoever changed it
   (window, hardware button, Fn key, CLI). Optional: System → Toggles → *Show popup*.
-- **Window**: dark/light theme, font, no password prompt. Closing the window ends it; the tray icon opens it again.
+- **Window**: dark/light theme, a font field with typeahead over every installed family, an editable hex keyboard
+  colour, no password prompt. Closing the window ends it; the tray icon opens it again.
 - **Startup**: *Open at login* (Settings) starts the window and the tray icon when you log in; with *Start minimized*
   on, only the tray icon starts and the window opens from it. The service always starts at boot, whatever these say.
 - **CLI** for all of the above, plus battery charge *profiles* (Standard / Trickle / Long Life).

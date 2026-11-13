@@ -80,9 +80,20 @@ pub fn system_mono() -> String {
         .unwrap_or_else(|| "monospace".into())
 }
 
-/// Every installed font family (fontconfig), sorted and de-duplicated.
+/// Every installed font family name (fontconfig), sorted and de-duplicated. A font can carry several
+/// ("DejaVu Sans,DejaVu Sans Condensed"); all of them select it, so all are listed.
 pub fn installed_fonts() -> Vec<String> {
-    let mut v = fontconfig(&["fc-list", "-f", "%{family[0]}\n"]);
+    family_names(&fontconfig(&["fc-list", ":", "family"]))
+}
+
+/// The distinct names in `fc-list : family` lines, comma separated, in case-insensitive order.
+fn family_names(lines: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = lines
+        .iter()
+        .flat_map(|l| l.split(','))
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
     v.sort_by_key(|f| f.to_lowercase());
     v.dedup();
     v
@@ -91,6 +102,27 @@ pub fn installed_fonts() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_name_of_a_font_is_listed_once() {
+        let lines = [
+            "DejaVu Sans,DejaVu Sans Condensed".to_string(),
+            "DejaVu Sans".to_string(),
+            " JetBrainsMono NF , JetBrainsMono NF Light ".to_string(),
+            "".to_string(),
+            "abc".to_string(),
+        ];
+        assert_eq!(
+            family_names(&lines),
+            [
+                "abc",
+                "DejaVu Sans",
+                "DejaVu Sans Condensed",
+                "JetBrainsMono NF",
+                "JetBrainsMono NF Light"
+            ]
+        );
+    }
 
     #[test]
     fn defaults_are_dark_system_font_and_roundtrip() {

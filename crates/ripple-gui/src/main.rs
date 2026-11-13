@@ -8,23 +8,24 @@
 mod autostart;
 mod drag;
 mod hw;
+mod input;
 mod remote;
 mod settings;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    canvas, deferred, div, prelude::*, px, relative, rgb, size, uniform_list, AnyElement, App,
-    Application, Bounds, Context, Div, ElementId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, ResizeEdge, ScrollStrategy, SharedString, Stateful, TitlebarOptions,
-    UniformListScrollHandle, Window, WindowBounds, WindowDecorations, WindowOptions,
+    canvas, deferred, div, prelude::*, px, relative, rgb, size, AnyElement, App, Application,
+    Bounds, Context, Div, ElementId, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, ResizeEdge, SharedString, Stateful, TitlebarOptions, Window,
+    WindowBounds, WindowDecorations, WindowOptions,
 };
 use hw::{FanMode, Field, Hw, Snapshot, PROFILES};
+use input::{Outcome, TextInput};
 use ripple_core::modes::OperatingMode;
 use ripple_hw::control::{self, Hsv, Preset, Profile};
 use ripple_hw::notify::{ensure_tray, is_experimental, toggle_label};
@@ -214,8 +215,16 @@ struct Ui {
     system_font: SharedString,
     fonts: Vec<String>,
     dropdown_open: bool,
-    font_open: bool,
-    font_scroll: UniformListScrollHandle,
+    /// The two text fields: the keyboard colour as hex, and the font family.
+    hex: TextInput,
+    font: TextInput,
+    hex_focus: FocusHandle,
+    font_focus: FocusHandle,
+    /// Whether each is being edited; set at the top of every render, which has the window.
+    hex_focused: bool,
+    font_focused: bool,
+    /// Highlighted row of the font typeahead.
+    font_sel: usize,
     /// Is the open-at-login entry installed?
     autostart: bool,
     /// Profile under the mouse in the dropdown, shown in the "what changes" panel.
@@ -249,8 +258,6 @@ impl Ui {
         .detach();
         let mut settings = Settings::load();
         settings.light |= start.light;
-        let font_scroll = UniformListScrollHandle::new();
-        font_scroll.scroll_to_item(0, ScrollStrategy::Top);
         Self {
             hw,
             snap: shared.latest(),
@@ -260,8 +267,13 @@ impl Ui {
             settings,
             system_font: settings::system_mono().into(),
             dropdown_open: start.open && start.tab == Tab::Profiles,
-            font_open: start.open && start.tab == Tab::Settings,
-            font_scroll,
+            hex: TextInput::new(|c| c == '#' || c.is_ascii_hexdigit(), 7),
+            font: TextInput::new(|c| !c.is_control(), 64),
+            hex_focus: cx.focus_handle(),
+            font_focus: cx.focus_handle(),
+            hex_focused: false,
+            font_focused: false,
+            font_sel: 0,
             autostart: autostart::Layout::system().is_enabled(),
             preview: None,
             sliders: Rc::new(RefCell::new(HashMap::new())),
@@ -375,6 +387,168 @@ impl Ui {
         cx.notify();
     }
 
+    // ---- text fields
+
+    /// Say something in the status bar.
+    fn say(&mut self, msg: impl Into<String>, cx: &mut Context<Self>) {
+        self.hw.lock().unwrap_or_else(|e| e.into_inner()).event = msg.into();
+        cx.notify();
+    }
+
+    /// The text a field shows while it is not being edited.
+    fn canonical(&self, which: InputId) -> String {
+        match which {
+            InputId::Hex => {
+                let h = self.snap.hsv;
+                format!("#{:06x}", hsv_hex(h.h, h.s, h.v))
+            }
+            InputId::Font => self.settings.font.clone().unwrap_or_default(),
+        }
+    }
+
+    fn input_key(
+        &mut self,
+        which: InputId,
+        ev: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let k = &ev.keystroke;
+        let ctrl = k.modifiers.control || k.modifiers.platform;
+        let paste = if ctrl && k.key == "v" {
+            cx.read_from_clipboard().and_then(|i| i.text())
+        } else {
+            None
+        };
+        let field = match which {
+            InputId::Hex => &mut self.hex,
+            InputId::Font => &mut self.font,
+        };
+        match field.key(&k.key, k.key_char.as_deref(), ctrl, paste.as_deref()) {
+            Outcome::Nothing => {}
+            Outcome::Changed => self.font_sel = 0,
+            // the field shows its value again on the next render, once it has lost the focus
+            Outcome::Cancel => window.blur(),
+            Outcome::Up => self.font_sel = self.font_sel.saturating_sub(1),
+            Outcome::Down => {
+                let last = self.font_rows().0.len().saturating_sub(1);
+                self.font_sel = (self.font_sel + 1).min(last);
+            }
+            Outcome::Submit => match which {
+                InputId::Hex => self.apply_hex(window, cx),
+                InputId::Font => self.apply_font(window, cx),
+            },
+        }
+        cx.notify();
+    }
+
+    /// Enter in the colour field: the typed colour becomes the keyboard colour, as `rcc rgb color` does.
+    fn apply_hex(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rgb8) = parse_hex(self.hex.text()) else {
+            return self.say("error: colour must be #rrggbb (or #rgb)", cx);
+        };
+        let levels = control::kb_from_8bit(rgb8);
+        // all-zero levels would be black, which is not a colour for the EC: that is what Off is for
+        if levels == (0, 0, 0) {
+            return self.say(
+                "error: black is not a keyboard colour, use Effect > Off",
+                cx,
+            );
+        }
+        let hsv = Hsv::from_levels(levels);
+        self.act(cx, move |hw| hw.set_keyboard(hsv));
+        window.blur();
+    }
+
+    /// What the font typeahead offers (`None` is the system default) and how many match in all.
+    fn font_rows(&self) -> (Vec<Option<String>>, usize) {
+        let typed = self.font.text();
+        if typed.trim().is_empty() {
+            let rows = std::iter::once(None)
+                .chain(self.fonts.iter().take(FONT_ROWS - 1).cloned().map(Some))
+                .collect();
+            return (rows, self.fonts.len());
+        }
+        let (hits, total) = input::suggest(&self.fonts, typed, FONT_ROWS);
+        (
+            hits.into_iter().map(|h| Some(h.to_string())).collect(),
+            total,
+        )
+    }
+
+    /// Enter in the font field: the highlighted row (the first by default).
+    fn apply_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (rows, _) = self.font_rows();
+        match rows.get(self.font_sel.min(rows.len().saturating_sub(1))) {
+            Some(row) => self.pick_font(row.clone(), window, cx),
+            None => {
+                let typed = self.font.text().to_string();
+                self.say(format!("error: no installed font matches '{typed}'"), cx)
+            }
+        }
+    }
+
+    fn pick_font(&mut self, font: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.font = font;
+        self.save_settings(cx);
+        window.blur(); // the field shows the saved family again
+    }
+
+    /// A single-line text field: accent border while edited, the text with a caret, or a placeholder.
+    fn text_field(
+        &self,
+        which: InputId,
+        id: &'static str,
+        width: f32,
+        placeholder: String,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let p = self.p();
+        let (input, focus, focused) = match which {
+            InputId::Hex => (&self.hex, self.hex_focus.clone(), self.hex_focused),
+            InputId::Font => (&self.font, self.font_focus.clone(), self.font_focused),
+        };
+        let mut content = div().flex().items_center().overflow_hidden();
+        if input.text().is_empty() && !focused {
+            content = content.text_color(rgb(p.muted)).child(placeholder);
+        } else if focused && input.all_selected() {
+            content = content.child(div().bg(rgb(p.accent_bg)).child(input.text().to_string()));
+        } else if focused {
+            let (before, after) = input.split();
+            content = content
+                .child(before.to_string())
+                .child(div().w(px(1.)).h(px(16.)).bg(rgb(p.accent)))
+                .child(after.to_string());
+        } else {
+            content = content.child(input.text().to_string());
+        }
+        let click = focus.clone();
+        div()
+            .id(id)
+            .track_focus(&focus)
+            .on_key_down(cx.listener(move |ui, ev: &KeyDownEvent, window, cx| {
+                ui.input_key(which, ev, window, cx)
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, window, cx| {
+                    click.focus(window);
+                    cx.notify();
+                }),
+            )
+            .w(px(width))
+            .h(px(32.))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if focused { p.accent } else { p.border }))
+            .bg(rgb(p.panel))
+            .cursor_text()
+            .child(content)
+    }
+
     // ---- slider pointer handling
 
     fn step_for(&self, id: &'static str, x: f32) -> Option<(usize, usize, Pick)> {
@@ -409,8 +583,7 @@ impl Ui {
         }
     }
 
-    /// Send the final position once more: drag updates run as independent jobs, this guarantees
-    /// the hardware ends on the value the thumb was released at.
+    /// The pointer went up: send the final position (unless the hardware already has it).
     fn slider_release(&mut self, cx: &mut Context<Self>) {
         if let Some((id, i)) = self.slider.release() {
             self.slider_send(id, i, cx);
@@ -436,8 +609,7 @@ impl Ui {
     fn slider_send(&mut self, id: &'static str, i: usize, cx: &mut Context<Self>) {
         let pick = self.sliders.borrow().get(id).map(|r| r.pick.clone());
         if let Some(pick) = pick {
-            let job = pick(i);
-            self.act(cx, job);
+            self.run(cx, pick(i), true);
         }
     }
 
@@ -646,6 +818,30 @@ fn preset_of(s: &Snapshot, p: Profile) -> Preset {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputId {
+    Hex,
+    Font,
+}
+
+/// Rows the font typeahead shows at most.
+const FONT_ROWS: usize = 8;
+
+/// `#rrggbb` or `#rgb` (the `#` is optional) as 8-bit channels.
+fn parse_hex(text: &str) -> Option<(u8, u8, u8)> {
+    let t = text.trim().trim_start_matches('#');
+    if !t.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let two = |i: usize| u8::from_str_radix(&t[i..i + 2], 16).ok();
+    let one = |i: usize| u8::from_str_radix(&t[i..i + 1], 16).ok().map(|d| d * 17);
+    match t.len() {
+        6 => Some((two(0)?, two(2)?, two(4)?)),
+        3 => Some((one(0)?, one(1)?, one(2)?)),
+        _ => None,
+    }
+}
+
 /// Display colour (0xRRGGBB) of an HSV choice, via the EC's own level maths.
 fn hsv_hex(h: u16, sat: u8, v: u8) -> u32 {
     let (r, g, b) = Hsv { h, s: sat, v }.to_levels();
@@ -812,10 +1008,10 @@ impl Ui {
                     .when(!active, |d| {
                         d.text_color(rgb(p.muted)).hover(|s| s.bg(rgb(p.hover)))
                     })
-                    .on_click(cx.listener(move |ui, _, _, cx| {
+                    .on_click(cx.listener(move |ui, _, window, cx| {
                         ui.tab = tab;
                         ui.dropdown_open = false;
-                        ui.font_open = false;
+                        window.blur(); // ends any text editing
                         cx.notify();
                     }))
                     .child(label)
@@ -1275,7 +1471,7 @@ impl Ui {
                 .into_any_element();
         }
         let hsv = s.hsv;
-        let full = hsv_hex(hsv.h, hsv.s, 100);
+        let shown = hsv_hex(hsv.h, hsv.s, hsv.v);
 
         // Presets set hue and saturation; the brightness you chose is kept.
         let colours: [(u16, u8); 9] = [
@@ -1394,9 +1590,10 @@ impl Ui {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(div().size_8().rounded_md().bg(rgb(full)).border_1().border_color(rgb(p.border)))
-                            .child(format!("#{full:06x}")),
+                            .child(div().size_8().rounded_md().bg(rgb(shown)).border_1().border_color(rgb(p.border)))
+                            .child(self.text_field(InputId::Hex, "hex-input", 110., "#rrggbb".into(), cx)),
                     )
+                    .child(note(p, "Type #rrggbb and press Enter. The EC has 51 levels per channel, so the colour snaps a little."))
                     .child(swatches),
             )
             .child(
@@ -1540,122 +1737,80 @@ impl Ui {
     /// Font select: same popover pattern as the profile dropdown. Every installed family is listed
     /// (virtualized, so hundreds of entries stay fast) and drawn in its own font. The first entry
     /// is the default, the system monospace font.
-    fn font_dropdown(&self, cx: &mut Context<Self>) -> Div {
+    /// The font field with its typeahead underneath while it is being edited.
+    fn font_field(&self, cx: &mut Context<Self>) -> Div {
         const W: f32 = 400.;
         let p = self.p();
-        let open = self.font_open;
-        let current = self
-            .settings
-            .font
-            .clone()
-            .unwrap_or_else(|| format!("Monospace (system: {})", self.system_font));
-
-        let trigger = div()
-            .id("font-dropdown")
-            .w(px(W))
-            .h(px(32.))
-            .px_3()
+        let default_label = format!("System monospace ({})", self.system_font);
+        let mut wrap = div()
             .flex()
-            .items_center()
-            .justify_between()
+            .flex_col()
+            .gap_1()
+            .w(px(W))
+            // clicking anywhere else ends the editing; clicks on the rows below are inside
+            .on_mouse_down_out(cx.listener(|ui, _, window, cx| {
+                if ui.font_focused {
+                    window.blur();
+                    cx.notify();
+                }
+            }))
+            .child(self.text_field(InputId::Font, "font-input", W, default_label.clone(), cx));
+        if !self.font_focused {
+            return wrap;
+        }
+        let (rows, total) = self.font_rows();
+        let sel = self.font_sel.min(rows.len().saturating_sub(1));
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .p_1()
             .rounded_md()
             .border_1()
-            .border_color(rgb(if open { p.accent } else { p.border }))
-            .bg(rgb(p.panel))
-            .hover(move |st| st.bg(rgb(p.hover)))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |ui, _, _, cx| {
-                    ui.font_open = !open;
-                    if !open {
-                        let sel = ui
-                            .settings
-                            .font
-                            .as_ref()
-                            .and_then(|f| ui.fonts.iter().position(|n| n == f))
-                            .map_or(0, |i| i + 1);
-                        ui.font_scroll.scroll_to_item(sel, ScrollStrategy::Top);
-                    }
-                    cx.notify();
-                }),
-            )
-            .child(div().truncate().font_family(self.family()).child(current))
-            .child(
+            .border_color(rgb(p.border))
+            .bg(rgb(p.popup));
+        for (i, row) in rows.iter().enumerate() {
+            let (label, family): (String, SharedString) = match row {
+                None => (default_label.clone(), self.system_font.clone()),
+                Some(n) => (n.clone(), n.clone().into()),
+            };
+            let pick = row.clone();
+            list = list.child(
                 div()
-                    .text_color(rgb(p.muted))
-                    .child(if open { "▴" } else { "▾" }),
+                    .id(("font", i))
+                    .h(px(26.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .when(i == sel, |d| d.bg(rgb(p.hover)))
+                    .hover(move |st| st.bg(rgb(p.hover)))
+                    // on mouse down: the row must still be there when the button is released
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |ui, _, window, cx| {
+                            ui.pick_font(pick.clone(), window, cx)
+                        }),
+                    )
+                    .child(div().truncate().font_family(family).child(label)),
             );
-
-        let mut wrap = div().relative().w(px(W)).child(trigger);
-        if open {
-            let rows = uniform_list(
-                "font-rows",
-                self.fonts.len() + 1,
-                cx.processor(|ui, range: Range<usize>, _window, cx| {
-                    let p = ui.p();
-                    range
-                        .map(|ix| {
-                            let (label, family, pick, active) = if ix == 0 {
-                                (
-                                    format!("Monospace (system: {})", ui.system_font),
-                                    ui.system_font.clone(),
-                                    None,
-                                    ui.settings.font.is_none(),
-                                )
-                            } else {
-                                let n = ui.fonts[ix - 1].clone();
-                                let active = ui.settings.font.as_deref() == Some(n.as_str());
-                                (n.clone(), SharedString::from(n.clone()), Some(n), active)
-                            };
-                            div()
-                                .id(("font", ix))
-                                .h(px(28.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .hover(move |st| st.bg(rgb(p.hover)))
-                                .when(active, |d| d.text_color(rgb(p.accent)))
-                                .on_click(cx.listener(move |ui, _, _, cx| {
-                                    ui.settings.font = pick.clone();
-                                    ui.font_open = false;
-                                    ui.save_settings(cx);
-                                }))
-                                .child(div().truncate().font_family(family).child(label))
-                                .child(div().text_color(rgb(p.accent)).child(if active {
-                                    "●"
-                                } else {
-                                    ""
-                                }))
-                        })
-                        .collect()
-                }),
-            )
-            .track_scroll(self.font_scroll.clone())
-            .h(px(280.));
-            let list = div()
-                .absolute()
-                .top(px(36.))
-                .left_0()
-                .w(px(W))
-                .p_1()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(p.border))
-                .bg(rgb(p.popup))
-                .shadow_lg()
-                .occlude()
-                .on_mouse_down_out(cx.listener(|ui, _, _, cx| {
-                    ui.font_open = false;
-                    cx.notify();
-                }))
-                .child(rows);
-            wrap = wrap.child(deferred(list).with_priority(1));
         }
+        if rows.is_empty() {
+            list = list.child(
+                div()
+                    .h(px(26.))
+                    .px_2()
+                    .text_color(rgb(p.muted))
+                    .child("No installed font matches"),
+            );
+        }
+        let typed = !self.font.text().trim().is_empty();
+        let count = if typed {
+            format!("{total} matches, showing {}", rows.len())
+        } else {
+            format!("{total} families installed")
+        };
+        wrap = wrap.child(list).child(note(p, count));
         wrap
     }
 
@@ -1686,7 +1841,7 @@ impl Ui {
         );
 
         let font = section(p, "Font")
-            .child(self.font_dropdown(cx))
+            .child(self.font_field(cx))
             .child(
                 div()
                     .font_family(self.family())
@@ -1694,10 +1849,7 @@ impl Ui {
             )
             .child(note(
                 p,
-                format!(
-                    "{} families. Default: the system monospace font.",
-                    self.fonts.len()
-                ),
+                "Type to search the installed fonts; Up/Down and Enter or a click picks. Empty is the system monospace font.",
             ));
 
         let startup = section(p, "Startup")
@@ -1731,7 +1883,18 @@ impl Ui {
 }
 
 impl Render for Ui {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // a field that is not being edited shows the saved value
+        self.hex_focused = self.hex_focus.is_focused(window);
+        self.font_focused = self.font_focus.is_focused(window);
+        if !self.hex_focused {
+            let t = self.canonical(InputId::Hex);
+            self.hex.set_text(&t);
+        }
+        if !self.font_focused {
+            let t = self.canonical(InputId::Font);
+            self.font.set_text(&t);
+        }
         let p = self.p();
         let body = match self.tab {
             Tab::Profiles => self.profiles_tab(cx),
@@ -1982,7 +2145,18 @@ fn open_main_window(cx: &mut App, shared: Arc<Shared>, start: Start) {
             app_id: Some("ripple-nova".into()),
             ..Default::default()
         },
-        move |_, cx| cx.new(|cx| Ui::new(shared, start, cx)),
+        move |window, cx| {
+            let ui = cx.new(|cx| Ui::new(shared, start, cx));
+            if start.open {
+                // --open: the field of the tab, so it can be tried (and screenshotted) in its editing state
+                ui.update(cx, |ui, _| match start.tab {
+                    Tab::Settings => window.focus(&ui.font_focus),
+                    Tab::Keyboard => window.focus(&ui.hex_focus),
+                    _ => {}
+                });
+            }
+            ui
+        },
     )
     .unwrap();
 }
@@ -2010,6 +2184,18 @@ fn show_window(cx: &mut App, shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_colours_parse_with_or_without_the_hash_and_in_short_form() {
+        assert_eq!(parse_hex("#ff8800"), Some((255, 136, 0)));
+        assert_eq!(parse_hex("ff8800"), Some((255, 136, 0)));
+        assert_eq!(parse_hex("  #F80 "), Some((255, 136, 0)));
+        assert_eq!(parse_hex("#12"), None);
+        assert_eq!(parse_hex("#ff88000"), None);
+        assert_eq!(parse_hex("#gg0000"), None);
+        assert_eq!(parse_hex(""), None);
+        assert_eq!(parse_hex("#"), None);
+    }
 
     #[test]
     fn slider_snaps_to_the_nearest_step_and_clamps_at_the_ends() {
