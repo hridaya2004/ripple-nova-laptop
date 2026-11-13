@@ -69,7 +69,8 @@ pub fn toggle_label(name: &str) -> &str {
         "fn_lock" => "Fn lock",
         "super_key_enable" => "Super key",
         "rainbow_animation" => "Lightbar rainbow",
-        "breathing_in_suspend" => "Lightbar breathing",
+        "breathing_in_suspend" => "Breathing in suspend",
+        "touchpad_toggle_enable" => "Touchpad toggle",
         "ac_auto_boot" => "AC Auto-Boot",
         "usb_powershare_high" => "USB powershare",
         other => other,
@@ -137,7 +138,7 @@ mod tests {
     fn toggle_labels_use_the_real_sysfs_names() {
         // the keys are the kernel attribute names (see PLATFORM_ATTRS); a typo here leaves the raw name on screen
         for name in crate::linux::PLATFORM_ATTRS {
-            if matches!(*name, "fn_lock" | "super_key_enable" | "ac_auto_boot" | "usb_powershare_high") {
+            if matches!(*name, "fn_lock" | "super_key_enable" | "ac_auto_boot" | "usb_powershare_high" | "breathing_in_suspend" | "touchpad_toggle_enable") {
                 assert_ne!(toggle_label(name), *name, "{name} has no label");
             }
         }

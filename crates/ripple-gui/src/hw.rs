@@ -208,9 +208,7 @@ impl Hw {
             if s.has_lightbar {
                 s.lightbar = u.lightbar().ok().map(|(r, g, b, _)| (r, g, b));
             }
-            // Only plain 0/1 attributes become toggles; `ctgp_offset` belongs to the profiles, and
-            // the lightbar animations are meaningless without a lightbar. `touchpad_toggle_enable`
-            // had no visible effect here (removed on request until it is understood).
+            // Only plain 0/1 attributes become toggles (which ones: `control::toggle_shown`).
             s.toggles = control::platform_toggles(u, s.has_lightbar);
         }
         s

@@ -664,14 +664,23 @@ fn cpu_gpu_temps(s: &crate::linux::Sensors) -> (Option<f64>, Option<f64>) {
     (by("CPU", 0), by("GPU", 1))
 }
 
-/// The platform toggles that are plain 0/1 (Fn lock, ...), as `(name, on)`. `ctgp_offset` belongs to the
-/// profiles, `touchpad_toggle_enable` gates a feature that does nothing here, and the lightbar animations
-/// are meaningless without a lightbar.
+/// Does a platform attribute get a toggle? `ctgp_offset` belongs to the profiles; `rainbow_animation` (older
+/// drivers; the newer one made it an LED trigger) is a lightbar animation and means nothing without a lightbar.
+/// `breathing_in_suspend` and `touchpad_toggle_enable` are always shown: on this laptop (no lightbar, a touchpad
+/// double tap that does nothing) their effect is the LED while the machine is suspended, which the user sees.
+fn toggle_shown(name: &str, has_lightbar: bool) -> bool {
+    match name {
+        "ctgp_offset" => false,
+        "rainbow_animation" => has_lightbar,
+        _ => true,
+    }
+}
+
+/// The platform toggles that are plain 0/1 (Fn lock, ...), as `(name, on)`.
 pub fn platform_toggles(u: &SysfsEc, has_lightbar: bool) -> Vec<(&'static str, bool)> {
     u.platform_attrs()
         .into_iter()
-        .filter(|(n, _)| !matches!(*n, "ctgp_offset" | "touchpad_toggle_enable"))
-        .filter(|(n, _)| has_lightbar || !matches!(*n, "rainbow_animation" | "breathing_in_suspend"))
+        .filter(|(n, _)| toggle_shown(n, has_lightbar))
         .filter_map(|(n, v)| match v.as_deref() {
             Some("1") => Some((n, true)),
             Some("0") => Some((n, false)),
@@ -1010,6 +1019,18 @@ mod tests {
         assert_eq!(run(0x77, Profile::Stock(Office), true), 0xE7);
         // profile off: plain mode change
         assert_eq!(run(0xA7, Profile::Stock(Gaming), false), 0x07);
+    }
+
+    #[test]
+    fn which_attributes_become_toggles() {
+        for lightbar in [false, true] {
+            assert!(!toggle_shown("ctgp_offset", lightbar)); // the profiles' business
+            for name in ["fn_lock", "super_key_enable", "breathing_in_suspend", "touchpad_toggle_enable"] {
+                assert!(toggle_shown(name, lightbar), "{name} (lightbar: {lightbar})");
+            }
+        }
+        assert!(!toggle_shown("rainbow_animation", false));
+        assert!(toggle_shown("rainbow_animation", true));
     }
 
     #[test]

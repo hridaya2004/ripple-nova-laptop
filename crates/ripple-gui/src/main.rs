@@ -1068,6 +1068,8 @@ impl Ui {
                 "super_key_enable" => "The Super (Windows) key works",
                 "ac_auto_boot" => "Power on when AC is plugged in",
                 "usb_powershare_high" => "Keep the USB ports powered when off",
+                "breathing_in_suspend" => "Breathing LED animation while suspended on AC power",
+                "touchpad_toggle_enable" => "Firmware touchpad toggle; its LED lights while suspended",
                 _ => "",
             }
         }
