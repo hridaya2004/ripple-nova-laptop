@@ -1058,7 +1058,7 @@ impl Ui {
     /// over the page (it never pushes content), and a click anywhere else closes it.
     fn profile_dropdown(&self, cx: &mut Context<Self>) -> Div {
         const W: f32 = 400.;
-        const NAME_W: f32 = 76.;
+        const NAME_W: f32 = 96.;
         const CPU_W: f32 = 132.;
         let p = self.p();
         let s = &self.snap;
