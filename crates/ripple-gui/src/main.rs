@@ -6,6 +6,7 @@
 //! never blocks.
 
 mod autostart;
+mod drag;
 mod hw;
 mod remote;
 mod settings;
@@ -220,8 +221,8 @@ struct Ui {
     /// Profile under the mouse in the dropdown, shown in the "what changes" panel.
     preview: Option<Profile>,
     sliders: Rc<RefCell<HashMap<&'static str, SliderReg>>>,
-    /// Slider being dragged: `(id, position last sent)`.
-    drag: Option<(&'static str, usize)>,
+    /// The slider being dragged and its debounce state.
+    slider: drag::SliderDrag,
 }
 
 impl Ui {
@@ -264,7 +265,7 @@ impl Ui {
             autostart: autostart::Layout::system().is_enabled(),
             preview: None,
             sliders: Rc::new(RefCell::new(HashMap::new())),
-            drag: None,
+            slider: drag::SliderDrag::default(),
         }
     }
 
@@ -289,6 +290,19 @@ impl Ui {
         cx: &mut Context<Self>,
         job: impl FnOnce(&mut Hw) -> Result<String, String> + Send + 'static,
     ) {
+        self.run(cx, job, false);
+    }
+
+    /// `act`, counting it as a slider job when `slider` is set: the thumb is held until the last one lands.
+    fn run(
+        &mut self,
+        cx: &mut Context<Self>,
+        job: impl FnOnce(&mut Hw) -> Result<String, String> + Send + 'static,
+        slider: bool,
+    ) {
+        if slider {
+            self.slider.job_started();
+        }
         let hw = self.hw.clone();
         cx.spawn(async move |this, cx| {
             let snap = cx
@@ -299,7 +313,13 @@ impl Ui {
                     hw.snapshot()
                 })
                 .await;
-            this.update(cx, |ui, cx| ui.set_snap(snap, cx)).ok();
+            this.update(cx, |ui, cx| {
+                ui.set_snap(snap, cx);
+                if slider {
+                    ui.slider.job_done();
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -369,23 +389,21 @@ impl Ui {
     }
 
     fn slider_press(&mut self, id: &'static str, x: f32, cx: &mut Context<Self>) {
-        if let Some((i, value, pick)) = self.step_for(id, x) {
-            self.drag = Some((id, i));
-            if i != value {
-                let job = pick(i);
-                self.act(cx, job);
-            }
+        if let Some((i, value, _)) = self.step_for(id, x) {
+            let generation = self.slider.press(id, value, i);
+            self.slider_timer(generation, cx);
             cx.notify();
         }
     }
 
     fn slider_drag(&mut self, x: f32, cx: &mut Context<Self>) {
-        let Some((id, last)) = self.drag else { return };
-        if let Some((i, _, pick)) = self.step_for(id, x) {
+        let Some((id, last)) = self.slider.thumb.filter(|_| self.slider.down) else {
+            return;
+        };
+        if let Some((i, _, _)) = self.step_for(id, x) {
             if i != last {
-                self.drag = Some((id, i));
-                let job = pick(i);
-                self.act(cx, job);
+                let generation = self.slider.moved(id, i);
+                self.slider_timer(generation, cx);
                 cx.notify();
             }
         }
@@ -394,9 +412,28 @@ impl Ui {
     /// Send the final position once more: drag updates run as independent jobs, this guarantees
     /// the hardware ends on the value the thumb was released at.
     fn slider_release(&mut self, cx: &mut Context<Self>) {
-        let Some((id, i)) = self.drag.take() else {
-            return;
-        };
+        if let Some((id, i)) = self.slider.release() {
+            self.slider_send(id, i, cx);
+        }
+        self.slider.settle();
+        cx.notify();
+    }
+
+    /// Debounce: send the thumb's position only if the pointer has not moved for `drag::DEBOUNCE`.
+    fn slider_timer(&mut self, generation: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(drag::DEBOUNCE).await;
+            this.update(cx, |ui, cx| {
+                if let Some((id, i)) = ui.slider.due(generation) {
+                    ui.slider_send(id, i, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn slider_send(&mut self, id: &'static str, i: usize, cx: &mut Context<Self>) {
         let pick = self.sliders.borrow().get(id).map(|r| r.pick.clone());
         if let Some(pick) = pick {
             let job = pick(i);
@@ -427,7 +464,7 @@ impl Ui {
         );
 
         // while dragging show the thumb where the pointer is, not where the hardware last was
-        let shown = match self.drag {
+        let shown = match self.slider.thumb {
             Some((d, i)) if d == id => i,
             _ => spec.value,
         };
@@ -1717,7 +1754,7 @@ impl Render for Ui {
             .border_color(rgb(p.border))
             // slider drags continue outside the slider, anywhere in the window
             .on_mouse_move(cx.listener(|ui, e: &MouseMoveEvent, _, cx| {
-                if ui.drag.is_some() {
+                if ui.slider.down {
                     if e.pressed_button == Some(MouseButton::Left) {
                         ui.slider_drag(f32::from(e.position.x), cx);
                     } else {
