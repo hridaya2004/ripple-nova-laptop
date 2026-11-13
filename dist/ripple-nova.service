@@ -6,12 +6,17 @@ After=systemd-modules-load.service
 Type=simple
 # Runs as root on purpose: it needs /proc/acpi/call, EC registers and sysfs writes.
 ExecStartPre=-/usr/bin/env modprobe acpi_call
-ExecStartPre=-/usr/bin/env modprobe uniwill-laptop
+ExecStartPre=-/usr/bin/env modprobe uniwill-laptop force=1
 ExecStart=@BINDIR@/rcc watch
+# The custom fan profile leaves the fans on manual speed: whenever the daemon ends (stop, crash,
+# kill), hand them back to the firmware.
+ExecStopPost=-@BINDIR@/rcc fan release
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=yes
-ProtectHome=yes
+# Not ProtectHome=yes: that also hides /run/user, where the session buses are, and the daemon sends
+# the popup for a button press there. Home directories stay hidden this way.
+InaccessiblePaths=/home /root
 PrivateTmp=yes
 ProtectSystem=full
 
