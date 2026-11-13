@@ -1591,7 +1591,15 @@ impl Ui {
                             .items_center()
                             .gap_3()
                             .child(div().size_8().rounded_md().bg(rgb(shown)).border_1().border_color(rgb(p.border)))
-                            .child(self.text_field(InputId::Hex, "hex-input", 110., "#rrggbb".into(), cx)),
+                            .child(
+                                self.text_field(InputId::Hex, "hex-input", 110., "#rrggbb".into(), cx)
+                                    .on_mouse_down_out(cx.listener(|ui, _, window, cx| {
+                                        if ui.hex_focused {
+                                            window.blur();
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
                     )
                     .child(note(p, "Type #rrggbb and press Enter. The EC has 51 levels per channel, so the colour snaps a little."))
                     .child(swatches),
