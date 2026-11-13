@@ -7,10 +7,12 @@
 #   ./install.sh --uninstall  remove everything this script installed
 #   DESTDIR=/dir ./install.sh stage the files under /dir, touching neither the system nor systemd
 #
-# Installs: rcc and rcc-gui (PREFIX/bin, default /usr/local), `ripple-nova` (opens the GUI as root:
+# Installs: rcc, rcc-gui and rcc-tray (PREFIX/bin, default /usr/local), `ripple-nova` (opens the GUI as root:
 # without a password through a sudoers rule that allows exactly rcc-gui for you, else through polkit)
 # + a menu entry and icon, the systemd service ripple-nova.service (runs `rcc watch` as root: follows
-# the mode button, keeps the profile and the button lights in sync, runs the custom fan profile), and
+# the mode button, keeps the profile and the button lights in sync, runs the custom fan profile, sends the
+# popups), the tray icon helper rcc-tray (autostarts in your session; GNOME needs its AppIndicator extension
+# to show it), and
 # the module list that loads acpi_call and uniwill-laptop at boot, and the uniwill-laptop kernel module
 # itself, built from vendor/uniwill-laptop (a git subtree of Wer-Wolf/uniwill-laptop) for the running kernel
 # into /usr/lib/modules/<kernel>/updates/. It has to be rebuilt after a kernel update: run this again.
@@ -41,7 +43,7 @@ uninstall() {
         $SUDO systemctl disable --now "$UNIT" 2>/dev/null || true
     fi
     $SUDO rm -f \
-        "$DESTDIR$BINDIR/rcc" "$DESTDIR$BINDIR/rcc-gui" "$DESTDIR$BINDIR/ripple-nova" \
+        "$DESTDIR$BINDIR/rcc" "$DESTDIR$BINDIR/rcc-gui" "$DESTDIR$BINDIR/rcc-tray" "$DESTDIR$BINDIR/ripple-nova" \
         "$DESTDIR/etc/systemd/system/$UNIT" \
         "$DESTDIR$PREFIX/share/applications/ripple-nova.desktop" \
         "$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps/ripple-nova.svg" \
@@ -49,8 +51,10 @@ uninstall() {
         "$DESTDIR/etc/modules-load.d/ripple-nova.conf" \
         "$DESTDIR/etc/modprobe.d/ripple-nova.conf" \
         "$DESTDIR/etc/xdg/autostart/ripple-nova.desktop" \
+        "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop" \
         "$DESTDIR"/usr/lib/modules/*/updates/uniwill-laptop.ko
     $SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"   # the app's own open-at-login copy
+    live && { pkill -x rcc-tray 2>/dev/null || true; }   # the icon helper runs as you (no process is fine)
     live && $SUDO systemctl daemon-reload
     live && $SUDO depmod -a   # forget the out-of-tree uniwill-laptop (the kernel's own one is used again)
     say "removed. Your settings stay in /etc/ripple-nova (delete it to forget them)."
@@ -120,10 +124,13 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 sed "s|@BINDIR@|$BINDIR|g" dist/ripple-nova.service > "$tmp/unit"
 sed "s|@BINDIR@|$BINDIR|g" dist/ripple-nova > "$tmp/launcher"
+sed "s|@BINDIR@|$BINDIR|g" dist/ripple-nova-tray.desktop > "$tmp/tray.desktop"
 
 say "installing"
 $SUDO install -Dm755 target/release/rcc "$DESTDIR$BINDIR/rcc"
 $SUDO install -Dm755 target/release/rcc-gui "$DESTDIR$BINDIR/rcc-gui"
+$SUDO install -Dm755 target/release/rcc-tray "$DESTDIR$BINDIR/rcc-tray"
+$SUDO install -Dm644 "$tmp/tray.desktop" "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop"
 $SUDO install -Dm755 "$tmp/launcher" "$DESTDIR$BINDIR/ripple-nova"
 $SUDO install -Dm644 dist/ripple-nova.desktop "$DESTDIR$PREFIX/share/applications/ripple-nova.desktop"
 $SUDO install -Dm644 dist/ripple-nova.svg "$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps/ripple-nova.svg"
@@ -156,6 +163,9 @@ fi
 if live; then
     command -v update-desktop-database >/dev/null && $SUDO update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
     command -v gtk-update-icon-cache >/dev/null && $SUDO gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+    say "starting the tray icon helper (it waits until the desktop has a tray)"
+    pkill -x rcc-tray 2>/dev/null || true
+    setsid -f "$BINDIR/rcc-tray" >/dev/null 2>&1 || true
     say "starting the daemon"
     [ -n "$KO" ] && $SUDO depmod -a
     $SUDO modprobe acpi_call 2>/dev/null || true
@@ -185,6 +195,8 @@ cat <<MSG
 Installed.
   daemon   ripple-nova.service (root), follows the mode button   journalctl -u $UNIT
   window   ripple-nova   (menu: Ripple Control Center), $window
+  tray     rcc-tray (autostarts at login). GNOME shows it only with the AppIndicator extension:
+           sudo pacman -S gnome-shell-extension-appindicator, then log out and in
   cli      sudo rcc doctor | status | mode get|set|next
   remove   ./install.sh --uninstall
 MSG
