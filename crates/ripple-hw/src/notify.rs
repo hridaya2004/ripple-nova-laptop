@@ -70,7 +70,7 @@ pub fn toggle_label(name: &str) -> &str {
         "super_key_enable" => "Super key",
         "rainbow_animation" => "Lightbar rainbow",
         "breathing_in_suspend" => "Lightbar breathing",
-        "ac_auto_boost" => "AC Auto-Boot",
+        "ac_auto_boot" => "AC Auto-Boot",
         "usb_powershare_high" => "USB powershare",
         other => other,
     }
@@ -132,6 +132,17 @@ impl Notifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toggle_labels_use_the_real_sysfs_names() {
+        // the keys are the kernel attribute names (see PLATFORM_ATTRS); a typo here leaves the raw name on screen
+        for name in crate::linux::PLATFORM_ATTRS {
+            if matches!(*name, "fn_lock" | "super_key_enable" | "ac_auto_boot" | "usb_powershare_high") {
+                assert_ne!(toggle_label(name), *name, "{name} has no label");
+            }
+        }
+        assert_eq!(toggle_label("ac_auto_boot"), "AC Auto-Boot");
+    }
 
     #[test]
     fn popups_are_on_unless_the_file_says_off() {
