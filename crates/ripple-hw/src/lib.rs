@@ -11,6 +11,8 @@ pub mod control;
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub mod notify;
+#[cfg(target_os = "linux")]
+pub mod touchpad;
 #[cfg(test)]
 mod mock;
 

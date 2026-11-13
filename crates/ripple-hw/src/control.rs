@@ -200,6 +200,13 @@ pub struct Config {
     /// Backlight level (1..=4) the keyboard had before "off", to come back to.
     #[serde(default)]
     pub keyboard_level: Option<u8>,
+    /// The touchpad is powered (its LED off). Off = the driver is unbound, see `touchpad.rs`.
+    #[serde(default = "yes")]
+    pub touchpad_on: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Config {
@@ -210,7 +217,7 @@ impl Config {
         let mut cfg = std::fs::read_to_string(Self::PATH)
             .ok()
             .and_then(|t| serde_json::from_str::<Self>(&t).ok())
-            .unwrap_or(Self { custom: default_custom(), keyboard: None, auto_boost_above: None, fan: FanCurves::default(), keyboard_level: None });
+            .unwrap_or(Self { custom: default_custom(), keyboard: None, auto_boost_above: None, fan: FanCurves::default(), keyboard_level: None, touchpad_on: true });
         if cfg.custom.validate().is_err() {
             cfg.custom = default_custom();
         }
@@ -676,9 +683,11 @@ fn toggle_shown(name: &str, has_lightbar: bool) -> bool {
     }
 }
 
-/// The platform toggles that are plain 0/1 (Fn lock, ...), as `(name, on)`.
+/// The platform toggles that are plain 0/1 (Fn lock, ...), as `(name, on)`, plus the touchpad's power switch
+/// as `("touchpad", on)` when there is a touchpad to switch.
 pub fn platform_toggles(u: &SysfsEc, has_lightbar: bool) -> Vec<(&'static str, bool)> {
-    u.platform_attrs()
+    let mut toggles: Vec<(&'static str, bool)> = u
+        .platform_attrs()
         .into_iter()
         .filter(|(n, _)| toggle_shown(n, has_lightbar))
         .filter_map(|(n, v)| match v.as_deref() {
@@ -686,7 +695,34 @@ pub fn platform_toggles(u: &SysfsEc, has_lightbar: bool) -> Vec<(&'static str, b
             Some("0") => Some((n, false)),
             _ => None,
         })
-        .collect()
+        .collect();
+    if let Some(on) = crate::touchpad::is_on() {
+        toggles.push(("touchpad", on));
+    }
+    toggles
+}
+
+/// Switch the touchpad on or off, now, and remember it: the daemon keeps the touchpad the way the user chose
+/// (after a reboot the driver binds by itself, so an "off" has to be re-applied).
+pub fn set_touchpad(on: bool) -> HwResult<()> {
+    let mut cfg = Config::load();
+    cfg.touchpad_on = on;
+    cfg.save()?;
+    crate::touchpad::set(on)
+}
+
+/// The daemon's touchpad loop: every two seconds, make the touchpad match the saved choice.
+pub fn touchpad_loop(stop: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    while !stop.load(Relaxed) {
+        let want = Config::load().touchpad_on;
+        if crate::touchpad::is_on().is_some_and(|now| now != want) {
+            if let Err(e) = crate::touchpad::set(want) {
+                eprintln!("touchpad: {e}");
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
 }
 
 /// Is Boost on? Boost is the manual bit with both duties at full (200). In Enthusiast the custom fan
@@ -1029,8 +1065,14 @@ mod tests {
                 assert!(toggle_shown(name, lightbar), "{name} (lightbar: {lightbar})");
             }
         }
-        assert!(!toggle_shown("rainbow_animation", false));
-        assert!(toggle_shown("rainbow_animation", true));
+        // the old lightbar animation only with a lightbar
+        assert!(!toggle_shown("rainbow_animation", false) && toggle_shown("rainbow_animation", true));
+    }
+
+    #[test]
+    fn the_touchpad_choice_defaults_to_on_and_survives_an_old_config() {
+        assert!(serde_json::from_str::<Config>("{}").unwrap().touchpad_on);
+        assert!(!serde_json::from_str::<Config>(r#"{"touchpad_on":false}"#).unwrap().touchpad_on);
     }
 
     #[test]
