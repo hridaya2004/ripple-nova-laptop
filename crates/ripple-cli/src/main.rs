@@ -44,6 +44,18 @@ pub enum Backend {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+pub enum TouchpadChoice {
+    /// Power the touchpad up (LED off)
+    On,
+    /// Power the touchpad down (LED on, no pointer)
+    Off,
+    /// The other one
+    Toggle,
+    /// Show whether it is on
+    Status,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum OnOff {
     On,
     Off,
@@ -99,6 +111,14 @@ pub enum Command {
     Display {
         #[command(subcommand)]
         cmd: DisplayCmd,
+    },
+    /// Touchpad power: `off` powers it down (no pointer, the touchpad LED lights, as in suspend), `on` powers it up
+    ///
+    /// The choice is remembered and the service re-applies it after a reboot. Bind it to a keyboard shortcut
+    /// (`sudo -n rcc touchpad toggle`, no password with the installer's sudoers rule) to get it back without a pointer.
+    Touchpad {
+        #[arg(value_enum)]
+        state: TouchpadChoice,
     },
     /// Kernel platform toggles (fn-lock, super key, touchpad, USB-C priority, cTGP)
     ///

@@ -29,6 +29,7 @@ pub fn run(cli: &Cli) -> CmdResult {
         crate::Command::Battery { cmd } => battery(cli, cmd),
         crate::Command::Display { cmd } => display(cli, cmd),
         crate::Command::System { cmd } => system(cli, cmd),
+        crate::Command::Touchpad { state } => touchpad(*state),
         crate::Command::Ec { cmd } => ec_cmd(cli, cmd),
     }
 }
@@ -638,6 +639,8 @@ fn watch(cli: &Cli) -> CmdResult {
     std::thread::spawn(|| control::fan_loop(&NEVER));
     // Popups for profile / fan boost / toggle changes, whoever makes them: the daemon is always there.
     std::thread::spawn(|| control::popup_loop(&NEVER));
+    // keeps the touchpad on or off as the user chose (an "off" does not survive a reboot by itself)
+    std::thread::spawn(|| control::touchpad_loop(&NEVER));
     let mut key = control::open_mode_key()?;
     let _lock = match control::follow_lock(false) {
         Some(l) => l,
@@ -736,6 +739,23 @@ fn fan(cli: &Cli, cmd: &FanCmd) -> CmdResult {
              Boost here), so the fans could be told to stop. Use `fan custom` or `fan boost on|off`."
         )),
     }
+}
+
+fn touchpad(choice: crate::TouchpadChoice) -> CmdResult {
+    use crate::TouchpadChoice::*;
+    let now = ripple_hw::touchpad::is_on().ok_or("no Uniwill touchpad (i2c-UNIW*) found")?;
+    let want = match choice {
+        On => true,
+        Off => false,
+        Toggle => !now,
+        Status => {
+            println!("touchpad: {}", if now { "on" } else { "off (powered down, LED on)" });
+            return Ok(());
+        }
+    };
+    control::set_touchpad(want)?;
+    println!("touchpad: {}", if want { "on" } else { "off (powered down, LED on)" });
+    Ok(())
 }
 
 fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
