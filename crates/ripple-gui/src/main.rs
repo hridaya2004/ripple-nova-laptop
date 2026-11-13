@@ -19,10 +19,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    canvas, deferred, div, prelude::*, px, relative, rgb, size, AnyElement, App, Application,
-    Bounds, Context, Div, ElementId, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, ResizeEdge, SharedString, Stateful, TitlebarOptions, Window,
-    WindowBounds, WindowDecorations, WindowOptions,
+    canvas, deferred, div, img, prelude::*, px, relative, rgb, size, AnyElement, App, Application,
+    Bounds, Context, Div, ElementId, FocusHandle, Image, ImageFormat, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, ResizeEdge, SharedString, Stateful, TitlebarOptions,
+    Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use hw::{FanMode, Field, Hw, Snapshot, PROFILES};
 use input::{Outcome, TextInput};
@@ -223,6 +223,8 @@ struct Ui {
     /// Whether each is being edited; set at the top of every render, which has the window.
     hex_focused: bool,
     font_focused: bool,
+    /// The app icon of the title bar, built once: `img` caches the rendering by the image's id.
+    icon: Arc<Image>,
     /// Highlighted row of the font typeahead.
     font_sel: usize,
     /// Is the open-at-login entry installed?
@@ -273,6 +275,10 @@ impl Ui {
             font_focus: cx.focus_handle(),
             hex_focused: false,
             font_focused: false,
+            icon: Arc::new(Image::from_bytes(
+                ImageFormat::Svg,
+                include_bytes!("../../../dist/ripple-nova.svg").to_vec(),
+            )),
             font_sel: 0,
             autostart: autostart::Layout::system().is_enabled(),
             preview: None,
@@ -865,7 +871,9 @@ fn change(p: Palette, label: &str, from: Option<u8>, to: u8, prefix: &str) -> Di
 
 // ------------------------------------------------------------------ window chrome
 
-fn window_button(id: &'static str, glyph: Div, hover: u32) -> Stateful<Div> {
+/// `hover` is off while the pointer is outside the window: GPUI gets no event when it leaves, so
+/// the hover style of the button it left from would stay.
+fn window_button(id: &'static str, glyph: Div, hover: Option<u32>) -> Stateful<Div> {
     div()
         .id(id)
         .w(px(42.))
@@ -873,7 +881,7 @@ fn window_button(id: &'static str, glyph: Div, hover: u32) -> Stateful<Div> {
         .flex()
         .items_center()
         .justify_center()
-        .hover(move |s| s.bg(rgb(hover)))
+        .when_some(hover, |d, c| d.hover(move |s| s.bg(rgb(c))))
         // Without this the titlebar's drag handler would start a window move on the click.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(glyph)
@@ -924,8 +932,9 @@ fn resize_handles() -> Vec<Div> {
 }
 
 impl Ui {
-    fn titlebar(&self) -> impl IntoElement {
+    fn titlebar(&self, window: &Window) -> impl IntoElement {
         let p = self.p();
+        let inside = window.is_window_hovered();
         let model = if self.snap.model.is_empty() {
             "detecting…".to_string()
         } else {
@@ -953,7 +962,7 @@ impl Ui {
                     .items_center()
                     .gap_3()
                     .pl_3()
-                    .child(div().size(px(10.)).rounded_sm().bg(rgb(p.accent)))
+                    .child(img(self.icon.clone()).size(px(18.)))
                     .child("Ripple Control Center")
                     .child(div().text_color(rgb(p.muted)).child(model)),
             )
@@ -961,20 +970,28 @@ impl Ui {
                 div()
                     .flex()
                     .child(
-                        window_button("w-min", div().w(px(10.)).h(px(1.)).bg(rgb(p.fg)), p.hover)
-                            .on_click(|_, window, _| window.minimize_window()),
+                        window_button(
+                            "w-min",
+                            div().w(px(10.)).h(px(1.)).bg(rgb(p.fg)),
+                            inside.then_some(p.hover),
+                        )
+                        .on_click(|_, window, _| window.minimize_window()),
                     )
                     .child(
                         window_button(
                             "w-max",
                             div().size(px(9.)).border_1().border_color(rgb(p.fg)),
-                            p.hover,
+                            inside.then_some(p.hover),
                         )
                         .on_click(|_, window, _| window.zoom_window()),
                     )
                     .child(
-                        window_button("w-close", div().text_size(px(16.)).child("×"), p.red)
-                            .on_click(|_, window, _| window.remove_window()),
+                        window_button(
+                            "w-close",
+                            div().text_size(px(16.)).child("×"),
+                            inside.then_some(p.red),
+                        )
+                        .on_click(|_, window, _| window.remove_window()),
                     ),
             )
     }
@@ -1937,7 +1954,7 @@ impl Render for Ui {
                 MouseButton::Left,
                 cx.listener(|ui, _, _, cx| ui.slider_release(cx)),
             )
-            .child(self.titlebar())
+            .child(self.titlebar(window))
             .child(self.tab_bar(cx))
             .child(
                 div()
