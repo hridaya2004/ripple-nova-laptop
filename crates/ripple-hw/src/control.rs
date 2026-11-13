@@ -573,6 +573,13 @@ pub fn is_boosted(byte: u8) -> bool {
     byte & FAN_MODE_MASK == FanControlByte::FanBoost.to_byte()
 }
 
+/// What each fan (CPU, GPU) is *told* to run at, in %, while the EC follows the duty registers (the manual bit:
+/// the custom profile, boost); `None` when it does not. hwmon's `pwm` is the EC's reported duty (EC 0x75B/0x75C),
+/// not those registers: in the window a stopped fan showed 100 % in custom mode. A duty that cannot be read is `None`.
+pub fn manual_duties(ec: &mut dyn EcAccess, byte: u8) -> Option<[Option<u8>; 2]> {
+    (byte & MANUAL_BIT != 0).then(|| [1, 2].map(|fan| ec.fan_duty(fan).ok().map(duty_from_ec)))
+}
+
 /// Software fan policy with 8 °C hysteresis. Only turns off a boost it turned on.
 pub fn auto_boost_action(
     threshold: Option<u8>,

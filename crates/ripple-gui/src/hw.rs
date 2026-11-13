@@ -185,6 +185,7 @@ impl Hw {
         self.cfg.fan = saved.fan;
         self.cfg.touchpad_on = saved.touchpad_on; // chosen elsewhere too (CLI, daemon): never write back a stale one
         s.fan = self.cfg.fan.clone();
+        let mut manual = None; // what the fans are told to run at, while the EC follows the duty registers
         if let Some(ec) = self.ec.as_deref_mut() {
             s.profile = control::current(ec, &stock, &custom).ok().flatten();
             s.pl = ec
@@ -193,6 +194,7 @@ impl Hw {
                 .zip(ec.read(addr::PL2_SETTING).ok());
             let fan_byte = ec.read(addr::MAFAN_CONTROL_BYTE).ok();
             s.boosted = fan_byte.is_some_and(control::is_boosted) && !self.cfg.fan.enabled;
+            manual = fan_byte.and_then(|b| control::manual_duties(ec, b));
             s.has_lightbar = control::has_lightbar(ec);
             s.has_keyboard = control::has_keyboard_rgb(ec);
             if s.has_keyboard {
@@ -226,11 +228,12 @@ impl Hw {
                     .iter()
                     .enumerate()
                     .map(|(i, (l, rpm))| {
-                        (
-                            l.clone(),
-                            *rpm,
-                            x.pwms.get(i).map(|p| u32::from(*p) * 100 / 255),
-                        )
+                        // in manual mode (custom profile, boost) hwmon's duty is not the one the fans follow
+                        let duty = match manual {
+                            Some(told) => told.get(i).copied().flatten().map(u32::from),
+                            None => x.pwms.get(i).map(|p| u32::from(*p) * 100 / 255),
+                        };
+                        (l.clone(), *rpm, duty)
                     })
                     .collect();
             }
