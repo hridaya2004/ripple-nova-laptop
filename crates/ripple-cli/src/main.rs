@@ -67,12 +67,12 @@ pub enum Command {
         #[arg(long, default_value_t = 1.0)]
         interval: f64,
     },
-    /// Performance profile (Office/Gaming/Turbo): show, set, cycle
+    /// Performance profile (Balanced/Enthusiast/Overboost): show, set, cycle
     Mode {
         #[command(subcommand)]
         cmd: ModeCmd,
     },
-    /// Follow the hardware mode button: each press cycles Office → Gaming → Turbo and
+    /// Follow the hardware mode button: each press cycles Balanced → Enthusiast → Overboost and
     /// applies it (what the stock Windows service does). Runs until stopped.
     Watch,
     /// Fan control: curves, boost, levels
@@ -145,7 +145,7 @@ pub enum ModeCmd {
     },
     /// Switch to the next mode, like one press of the hardware button
     Next,
-    /// Save your Custom preset (the stock ones are read-only): `rcc mode custom 45 50 --ctgp 5`
+    /// Save your custom performance profile preset (the stock ones are read-only): `rcc mode custom 45 50 --ctgp 5`
     Custom {
         /// PL1 in watts
         pl1: u8,
@@ -155,16 +155,21 @@ pub enum ModeCmd {
         #[arg(long, default_value_t = 0)]
         ctgp: u8,
     },
+    /// Put the custom performance profile preset back to its default
+    ResetCustom,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum ModeChoice {
-    /// 0 lights: lowest power (EC default PL, 35 W here)
-    Office,
-    /// 1 light: gaming (EC default PL, 55 W here)
-    Gaming,
-    /// 2 lights: Overboost (80 W + GPU cTGP +20 W, the stock app's values for this machine)
-    Turbo,
+    /// 0 lights: lowest power (EC default PL, 35 W here; was "office")
+    #[value(alias = "office")]
+    Balanced,
+    /// 1 light: EC default PL, 55 W here (was "gaming")
+    #[value(alias = "gaming")]
+    Enthusiast,
+    /// 2 lights: 80 W + GPU cTGP +20 W, the stock app's values for this machine (was "turbo")
+    #[value(alias = "turbo")]
+    Overboost,
     /// Your own preset (see `rcc mode custom`); not reachable with the hardware button
     Custom,
 }
@@ -181,10 +186,47 @@ pub enum FanCmd {
         #[arg(value_enum)]
         state: OnOff,
     },
-    /// Manual fan level (disabled: this EC's user-level tables are empty, see `fan level`)
+    /// Manual fan level (refused: this EC's user-level tables are empty; use `fan custom`)
     Level {
         /// 0=normal, 1..=5 user levels (0x81..0x85)
         level: u8,
+    },
+    /// Custom fan profile: your own curves for fan 1 (CPU) and fan 2 (GPU), run by the service
+    Custom {
+        #[command(subcommand)]
+        cmd: CustomFanCmd,
+    },
+    /// Hand the fans back to the firmware (what the service runs when it stops; does nothing while the
+    /// custom fan profile is off, unless --force)
+    Release {
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CustomFanCmd {
+    /// Show the curves and whether they are on
+    Show,
+    /// Turn the custom profile on (the service applies it within a few seconds)
+    On,
+    /// Turn it off and give the fans back to the firmware
+    Off,
+    /// Set the curves: duty % at 45/55/65/75/85 °C, five values each, never falling
+    /// (e.g. `--cpu 20,30,45,70,100`). Fan 1 follows the CPU temperature, fan 2 the GPU's.
+    Set {
+        #[arg(long, value_delimiter = ',')]
+        cpu: Option<Vec<u8>>,
+        #[arg(long, value_delimiter = ',')]
+        gpu: Option<Vec<u8>>,
+    },
+    /// Put the curves back to the default preset (on/off is kept)
+    Reset,
+    /// Run the engine in the foreground (what the service does, for testing). Stopping it any other
+    /// way than `--seconds` leaves the fans manual: run `rcc fan release`
+    Run {
+        #[arg(long)]
+        seconds: Option<u64>,
     },
 }
 
@@ -209,7 +251,7 @@ pub enum CurveCmd {
 pub enum PowerCmd {
     /// Show current PL1/PL2/TCC (EC read)
     Get,
-    /// Set PL1 in watts (5..=80, the stock Turbo value for this machine)
+    /// Set PL1 in watts (5..=80, the stock Overboost value for this machine)
     Pl1 { watts: u16 },
     /// Set PL2 in watts (5..=80)
     Pl2 { watts: u16 },
@@ -223,10 +265,20 @@ pub enum RgbCmd {
     State,
     /// Show effects list (ids as used by the EC/HID protocol)
     Effects,
-    /// Keyboard backlight colour: 6 hex digits (`ff8800`) or `off` (EC registers 1897-1899)
+    /// Keyboard backlight colour: 6 hex digits (`ff8800`) or `off` (same as `rcc rgb backlight off`)
     Color { color: String },
     /// Keyboard backlight brightness 0..=100 (percent of the chosen colour)
     Brightness { percent: u8 },
+    /// Keyboard backlight on/off (the level, like the Fn keys; on goes back to the level it had)
+    Backlight {
+        #[arg(value_enum)]
+        state: OnOff,
+    },
+    /// Keyboard rainbow (static, firmware effect): `on`, or `off` to go back to the colour
+    Rainbow {
+        #[arg(value_enum)]
+        state: OnOff,
+    },
     /// Lightbar color: 6 hex digits, `off`, or `on` (restores full white)
     ///
     /// Uses the kernel LED class (`uniwill:multicolor:status`).

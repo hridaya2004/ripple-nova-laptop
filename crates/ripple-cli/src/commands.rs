@@ -7,10 +7,11 @@ use ripple_core::modes::OperatingMode;
 use ripple_core::regs::{addr, duty_from_ec};
 use ripple_core::rgb::RgbRegState;
 use ripple_hw::control::{self, Config, Hsv, Preset, Profile};
+use ripple_hw::notify;
 use ripple_hw::{EcAccess, HwError};
 
 use crate::{
-    Backend, BatteryCmd, Cli, CurveCmd, DisplayCmd, EcCmd, FanCmd, ModeChoice, ModeCmd, PowerCmd,
+    Backend, BatteryCmd, Cli, CurveCmd, CustomFanCmd, DisplayCmd, EcCmd, FanCmd, ModeChoice, ModeCmd, PowerCmd,
     ProfileChoice, RgbCmd, SystemCmd,
 };
 
@@ -158,7 +159,12 @@ fn doctor(cli: &Cli) -> CmdResult {
     let sysfs_res = ripple_hw::linux::SysfsEc::probe()
         .map(|ec| format!("available ({})", ec.summary()))
         .map_err(err);
-    let hid_res = probe_hid();
+    // The ITE HID keyboard is only a question when the EC does not drive the backlight itself.
+    let ec_rgb = open_ec(cli).is_ok_and(|mut ec| control::has_keyboard_rgb(ec.as_mut()));
+    let hid_res = match probe_hid() {
+        Err(_) if ec_rgb => Ok("not needed: the EC drives the keyboard backlight (EC 1897-1899)".to_string()),
+        r => r,
+    };
 
     println!("\nbackends:");
     for (name, res) in [
@@ -226,20 +232,9 @@ fn doctor(cli: &Cli) -> CmdResult {
         fixes.push(String::new());
     }
     if let Err(e) = &hid_res {
-        fixes.push("RGB keyboard — ITE HID solution (only if this machine has one):".into());
+        fixes.push("RGB keyboard: neither the EC nor an ITE (048D) controller reports one:".into());
         fixes.push(format!("  {e}"));
-        if hidraw_present() {
-            fixes.push(
-                "  /dev/hidraw* exists but no 048D device → likely the EC RGB solution (registers 1897-1902); no HID setup needed".into(),
-            );
-        } else {
-            fixes.push(
-                "  no /dev/hidraw* → likely the EC RGB solution (registers 1897-1902); no HID setup needed".into(),
-            );
-        }
-        fixes.push(
-            "  ITE protocol: https://github.com/rodgomesc/avell-unofficial-control-center".into(),
-        );
+        fixes.push("  ITE protocol: https://github.com/rodgomesc/avell-unofficial-control-center".into());
         fixes.push(String::new());
     }
     let had_fixes = !fixes.is_empty();
@@ -398,15 +393,6 @@ fn module_loaded(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn hidraw_present() -> bool {
-    std::fs::read_dir("/dev")
-        .map(|rd| {
-            rd.flatten()
-                .any(|e| e.file_name().to_string_lossy().starts_with("hidraw"))
-        })
-        .unwrap_or(false)
-}
-
 fn status(cli: &Cli) -> CmdResult {
     let mut ec = open_ec(cli)?;
 
@@ -440,7 +426,7 @@ fn status(cli: &Cli) -> CmdResult {
                     Some(p) => format!("pwm {p:>3} ({:2.0} %)", *p as f64 * 100.0 / 255.0),
                     None => String::new(),
                 };
-                println!("  fan  {l:8}: {rpm:>5} rpm  {pwm}");
+                println!("  {l:13}: {rpm:>5} rpm  {pwm}");
             }
         }
         None => {
@@ -606,9 +592,9 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
         }
         ModeCmd::Set { mode } => {
             let p = match mode {
-                ModeChoice::Office => Profile::Stock(OperatingMode::Office),
-                ModeChoice::Gaming => Profile::Stock(OperatingMode::Gaming),
-                ModeChoice::Turbo => Profile::Stock(OperatingMode::Turbo),
+                ModeChoice::Balanced => Profile::Stock(OperatingMode::Office),
+                ModeChoice::Enthusiast => Profile::Stock(OperatingMode::Gaming),
+                ModeChoice::Overboost => Profile::Stock(OperatingMode::Turbo),
                 ModeChoice::Custom => Profile::Custom,
             };
             apply_profile(ec.as_mut(), cli, &stock, &cfg, p)
@@ -625,6 +611,13 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
             println!("custom preset saved: PL1 {pl1} W, PL2 {pl2} W, cTGP +{ctgp} W (apply with `rcc mode set custom`)");
             Ok(())
         }
+        ModeCmd::ResetCustom => {
+            cfg.custom = control::default_custom();
+            cfg.save()?;
+            let c = cfg.custom;
+            println!("custom preset back to the default: PL1 {} W, PL2 {} W, cTGP +{} W (apply with `rcc mode set custom`)", c.pl1, c.pl2, c.ctgp);
+            Ok(())
+        }
     }
 }
 
@@ -633,6 +626,17 @@ fn watch(cli: &Cli) -> CmdResult {
     let mut ec = open_ec(cli)?;
     let stock = control::stock(Some(ec.as_mut()));
     let cfg = Config::load();
+    // First find out which profile the EC is running (right after boot its limits are unset, only
+    // the lights know), write its limits and put the lights on it: this has to come before the fan
+    // engine can set its manual bit, which hides the mode from `current`.
+    match control::adopt(ec.as_mut(), uniwill(cli).ok().as_ref(), &stock, &cfg.custom)? {
+        Some(p) => println!("profile: {}", p.name()),
+        None => println!("profile: unknown (limits and lights match no profile)"),
+    }
+    // The custom fan profile (when switched on) runs inside this daemon, independent of the button
+    // lock below: it must not wait for a GUI that holds it.
+    static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    std::thread::spawn(|| control::fan_loop(&NEVER));
     let mut key = control::open_mode_key()?;
     let _lock = match control::follow_lock(false) {
         Some(l) => l,
@@ -641,16 +645,21 @@ fn watch(cli: &Cli) -> CmdResult {
             control::follow_lock(true).ok_or("could not take the button lock")?
         }
     };
-    // bring the button's lights in line with the limits that are already in force
-    if let Some(p) = control::current(ec.as_mut(), &stock, &cfg.custom)? {
-        control::set_mode_byte(ec.as_mut(), p)?;
-    }
     println!("watching the mode button (Ctrl+C to stop)");
     loop {
         control::wait_mode_key(&mut key)?;
         let cur = control::current(ec.as_mut(), &stock, &cfg.custom)?;
-        if let Err(e) = apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur)) {
-            eprintln!("error: {e}"); // keep watching, a failed press must not kill the daemon
+        let next = Profile::after_button(cur);
+        match apply_profile(ec.as_mut(), cli, &stock, &cfg, next) {
+            Ok(()) => {
+                // The window announces changes itself while it is open; with no window, the daemon does
+                // (it is the only one that saw the press).
+                if !notify::gui_running() && notify::popups_enabled() {
+                    let pr = preset_of(&stock, &cfg, next);
+                    notify::send_to_logged_in("Performance profile", &format!("{}: PL1 {} W / PL2 {} W", next.name(), pr.pl1, pr.pl2));
+                }
+            }
+            Err(e) => eprintln!("error: {e}"), // keep watching, a failed press must not kill the daemon
         }
     }
 }
@@ -704,6 +713,9 @@ fn fan(cli: &Cli, cmd: &FanCmd) -> CmdResult {
             }
         },
         FanCmd::Boost { state } => {
+            if state.as_bool() && Config::load().fan.enabled {
+                return Err("the custom fan profile is on and would undo the boost: `rcc fan custom off` first".into());
+            }
             let mut ec = open_ec(cli)?;
             let (old, new) = control::set_boost(ec.as_mut(), state.as_bool())?;
             if old == new {
@@ -713,12 +725,91 @@ fn fan(cli: &Cli, cmd: &FanCmd) -> CmdResult {
             }
             Ok(())
         }
+        FanCmd::Custom { cmd } => fan_custom(cli, cmd),
+        FanCmd::Release { force } => {
+            // the service runs this whenever it stops; without the custom profile the fans are not
+            // ours (a user's Boost, say), so leave them alone
+            if !*force && !Config::load().fan.enabled {
+                println!("the custom fan profile is off, the fans are not under its control (--force hands them back anyway)");
+                return Ok(());
+            }
+            let mut ec = open_ec(cli)?;
+            control::fan_release(ec.as_mut())?;
+            println!("fans handed back to the firmware");
+            Ok(())
+        }
         FanCmd::Level { level } => Err(format!(
             "fan level {level} refused: user fan levels (0x81..0x85) read their PWM from tables that are \
              empty on this EC (curve RAM 3840..4095 is all zero; regs 1859..1862 are GPU cTGP/Dynamic \
-             Boost here), so the fans could be told to stop. Use `fan boost on|off`."
+             Boost here), so the fans could be told to stop. Use `fan custom` or `fan boost on|off`."
         )),
     }
+}
+
+fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
+    let mut cfg = Config::load();
+    match cmd {
+        CustomFanCmd::Show => {
+            let anchors: Vec<String> = control::FAN_ANCHORS.iter().map(|t| format!("{t:>4}")).collect();
+            let row = |d: &[u8; 5]| d.iter().map(|d| format!("{d:>4}")).collect::<String>();
+            println!("custom fan profile: {}", if cfg.fan.enabled { "on" } else { "off" });
+            println!("  °C            {}", anchors.concat());
+            println!("  fan 1 (CPU) % {}", row(&cfg.fan.cpu));
+            println!("  fan 2 (GPU) % {}", row(&cfg.fan.gpu));
+            println!("  (linear between the points; at {} °C or with no sensor both fans run at 100 %)", control::FAN_PANIC_C);
+        }
+        CustomFanCmd::On => {
+            cfg.fan.enabled = true;
+            cfg.fan.validate()?;
+            cfg.save()?;
+            // the engine leaves a boost alone, so end it first or the profile would never take over
+            if let Ok(mut ec) = open_ec(cli) {
+                if ec.read(addr::MAFAN_CONTROL_BYTE).is_ok_and(control::is_boosted) {
+                    control::fan_release(ec.as_mut())?;
+                }
+            }
+            println!("custom fan profile on: the ripple-nova service applies it within a few seconds");
+        }
+        CustomFanCmd::Off => {
+            cfg.fan.enabled = false;
+            cfg.save()?;
+            control::fan_release(open_ec(cli)?.as_mut())?;
+            println!("custom fan profile off, fans handed back to the firmware");
+        }
+        CustomFanCmd::Set { cpu, gpu } => {
+            let arr = |v: &Vec<u8>| <[u8; 5]>::try_from(v.as_slice()).map_err(|_| "need exactly five values".to_string());
+            let mut new = cfg.fan.clone();
+            if let Some(v) = cpu {
+                new.cpu = arr(v)?;
+            }
+            if let Some(v) = gpu {
+                new.gpu = arr(v)?;
+            }
+            new.validate()?;
+            cfg.fan = new;
+            cfg.save()?;
+            println!("curves saved (on at {:?} °C)", control::FAN_ANCHORS);
+        }
+        CustomFanCmd::Reset => {
+            cfg.fan = control::FanCurves { enabled: cfg.fan.enabled, ..control::FanCurves::default() };
+            cfg.save()?;
+            println!("curves back to the default preset");
+        }
+        CustomFanCmd::Run { seconds } => {
+            static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if let Some(s) = *seconds {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(s));
+                    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+            if !cfg.fan.enabled {
+                return Err("the custom profile is off: `rcc fan custom on` first".into());
+            }
+            control::fan_loop(&STOP);
+        }
+    }
+    Ok(())
 }
 
 fn power(cli: &Cli, cmd: &PowerCmd) -> CmdResult {
@@ -752,6 +843,22 @@ fn power(cli: &Cli, cmd: &PowerCmd) -> CmdResult {
             Ok(())
         }
     }
+}
+
+/// Backlight on (back to the level it had) or off (the level is remembered).
+fn keyboard_backlight(ec: &mut dyn EcAccess, on: bool) -> CmdResult {
+    let mut cfg = Config::load();
+    if on {
+        control::keyboard_on(ec, cfg.keyboard_level)?;
+    } else {
+        let level = control::keyboard_off(ec)?;
+        if level > 0 {
+            cfg.keyboard_level = Some(level);
+            cfg.save()?;
+        }
+    }
+    println!("keyboard backlight {}", if on { "on" } else { "off" });
+    Ok(())
 }
 
 fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
@@ -818,8 +925,11 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
             if !control::has_keyboard_rgb(ec.as_mut()) {
                 return Err("the EC reports no RGB keyboard on this machine".into());
             }
-            let rgb = if color.eq_ignore_ascii_case("off") { (0, 0, 0) } else { parse_hex_color(color)? };
-            let hsv = Hsv::from_levels(control::kb_from_8bit(rgb));
+            if color.eq_ignore_ascii_case("off") {
+                return keyboard_backlight(ec.as_mut(), false);
+            }
+            let hsv = Hsv::from_levels(control::kb_from_8bit(parse_hex_color(color)?));
+            control::keyboard_on(ec.as_mut(), Config::load().keyboard_level)?;
             set_keyboard(ec.as_mut(), hsv)
         }
         RgbCmd::Brightness { percent } => {
@@ -835,6 +945,23 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
                 None => Hsv::from_levels(control::keyboard_rgb(ec.as_mut())?),
             };
             set_keyboard(ec.as_mut(), Hsv { v: *percent, ..base })
+        }
+        RgbCmd::Backlight { state } => {
+            let mut ec = open_ec(cli)?;
+            if !control::has_keyboard_rgb(ec.as_mut()) {
+                return Err("the EC reports no RGB keyboard on this machine".into());
+            }
+            keyboard_backlight(ec.as_mut(), state.as_bool())
+        }
+        RgbCmd::Rainbow { state } => {
+            let mut ec = open_ec(cli)?;
+            if !control::has_keyboard_rgb(ec.as_mut()) {
+                return Err("the EC reports no RGB keyboard on this machine".into());
+            }
+            control::keyboard_on(ec.as_mut(), Config::load().keyboard_level)?;
+            control::set_keyboard_rainbow(ec.as_mut(), state.as_bool())?;
+            println!("keyboard: {}", if state.as_bool() { "rainbow" } else { "colour" });
+            Ok(())
         }
         RgbCmd::Lightbar { color } => {
             let u = uniwill(cli)?;
