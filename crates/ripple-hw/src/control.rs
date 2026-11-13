@@ -792,14 +792,15 @@ fn cpu_gpu_temps(s: &crate::linux::Sensors) -> (Option<f64>, Option<f64>) {
 }
 
 /// Does a platform attribute get a toggle? `ctgp_offset` belongs to the profiles; `rainbow_animation` (older
-/// drivers; the newer one made it an LED trigger) is a lightbar animation and means nothing without a lightbar.
-/// The rest are shown on every machine, the doubtful ones marked experimental in the window
-/// (`notify::is_experimental`): `breathing_in_suspend` and `touchpad_toggle_enable` did nothing visible on this
-/// laptop (a lightbar feature, and the firmware's double tap), and the real touchpad switch is `touchpad.rs`.
+/// drivers; the newer one made it an LED trigger) and `breathing_in_suspend` are lightbar animations and mean
+/// nothing without a lightbar, so they follow `has_lightbar` (the same test that shows the lightbar controls).
+/// The rest are shown on every machine, the doubtful one marked experimental in the window
+/// (`notify::is_experimental`): `touchpad_toggle_enable` (the firmware's double tap) did nothing visible on this
+/// laptop, and the real touchpad switch is `touchpad.rs`.
 fn toggle_shown(name: &str, has_lightbar: bool) -> bool {
     match name {
         "ctgp_offset" => false,
-        "rainbow_animation" => has_lightbar,
+        "rainbow_animation" | "breathing_in_suspend" => has_lightbar,
         _ => true,
     }
 }
@@ -1376,13 +1377,12 @@ mod tests {
     fn which_attributes_become_toggles() {
         for lightbar in [false, true] {
             assert!(!toggle_shown("ctgp_offset", lightbar)); // the profiles' business
-                                                             // shown everywhere (the doubtful ones are marked experimental, not hidden)
+                                                             // shown everywhere (the doubtful one is marked experimental, not hidden)
             for name in [
                 "fn_lock",
                 "super_key_enable",
                 "ac_auto_boot",
                 "usb_powershare_high",
-                "breathing_in_suspend",
                 "touchpad_toggle_enable",
             ] {
                 assert!(
@@ -1391,9 +1391,20 @@ mod tests {
                 );
             }
         }
-        // the old lightbar animation only with a lightbar
-        assert!(
-            !toggle_shown("rainbow_animation", false) && toggle_shown("rainbow_animation", true)
+        // the lightbar animations only with a lightbar
+        for name in ["rainbow_animation", "breathing_in_suspend"] {
+            assert!(
+                !toggle_shown(name, false) && toggle_shown(name, true),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_duties_are_what_the_fans_are_told() {
+        let mut ec = FanEc(
+            crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0x47),
+            [0, 200],
         );
     }
 
