@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ripple-core", "crates/ripple-hw", "crates/ripple-cli", "crates/ripple-gui"]
+members = ["crates/ripple-core", "crates/ripple-hw", "crates/ripple-cli", "crates/ripple-gui", "crates/ripple-tray"]
 
 [workspace.package]
 version = "0.1.0"
