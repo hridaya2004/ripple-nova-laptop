@@ -7,7 +7,7 @@
 use std::io::Read;
 
 use ripple_core::modes::{FanControlByte, OperatingMode};
-use ripple_core::regs::addr;
+use ripple_core::regs::{addr, duty_from_ec, duty_to_ec};
 use serde::{Deserialize, Serialize};
 
 use crate::linux::SysfsEc;
@@ -194,6 +194,12 @@ pub struct Config {
     /// Software fan policy: boost the fans above this CPU temperature (°C), `None` = off.
     #[serde(default)]
     pub auto_boost_above: Option<u8>,
+    /// The custom fan profile (software curves, run by the daemon).
+    #[serde(default)]
+    pub fan: FanCurves,
+    /// Backlight level (1..=4) the keyboard had before "off", to come back to.
+    #[serde(default)]
+    pub keyboard_level: Option<u8>,
 }
 
 impl Config {
@@ -207,6 +213,9 @@ impl Config {
             .unwrap_or(Self { custom: default_custom(), keyboard: None, auto_boost_above: None, fan: FanCurves::default(), keyboard_level: None });
         if cfg.custom.validate().is_err() {
             cfg.custom = default_custom();
+        }
+        if cfg.fan.validate().is_err() {
+            cfg.fan = FanCurves::default(); // also switches it off
         }
         cfg
     }
@@ -405,13 +414,21 @@ pub fn kb_from_8bit((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
 /// Write the profile's mode nibble into EC 1873 (lights + fan profile). While fan boost is on the
 /// nibble belongs to the boost, so the new mode is stashed and takes effect when boost ends.
 pub fn set_mode_byte(ec: &mut dyn EcAccess, p: Profile) -> HwResult<()> {
+    set_mode_byte_with(ec, p, Config::load().fan.enabled)
+}
+
+fn set_mode_byte_with(ec: &mut dyn EcAccess, p: Profile, custom_fan_on: bool) -> HwResult<()> {
     let cur = ec.read(addr::MAFAN_CONTROL_BYTE)?;
     let nib = p.mode_nibble();
-    if is_boosted(cur) {
+    // With the custom fan engine on, bit 6 is its manual bit (not a boost) and has to stay. The
+    // config only *keeps* a bit that is already there: only the engine creates it, otherwise it
+    // would never see its own mark and take the byte for a user's boost (fans stuck at 100 %).
+    let manual = custom_fan_on && cur & MANUAL_BIT != 0;
+    if is_boosted(cur) && !manual {
         std::fs::write(STASH_PATH, (nib << 4).to_string())?;
         return Ok(());
     }
-    let new = (cur & 0x0F) | (nib << 4);
+    let new = (cur & 0x0F) | (nib << 4) | if manual { MANUAL_BIT } else { 0 };
     if new != cur {
         ec.write_verified(addr::MAFAN_CONTROL_BYTE, new)?;
     }
@@ -471,6 +488,210 @@ pub fn auto_boost_action(threshold: Option<u8>, temp_c: f64, boosted: bool, ours
     } else {
         None
     }
+}
+
+// ------------------------------------------------------------ custom fan curves
+
+/// °C at which the custom curve is defined, like the stock app's five user levels.
+pub const FAN_ANCHORS: [u8; 5] = [45, 55, 65, 75, 85];
+/// At or above this temperature, or with no readable sensor, the engine ignores the curves and runs
+/// both fans flat out.
+pub const FAN_PANIC_C: f64 = 90.0;
+/// How often the engine looks at the temperatures.
+pub const FAN_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+/// The EC follows the per-fan duty registers while this bit of EC 1873 is set (it is also the Boost
+/// bit). Measured here: it keeps the mode nibble, so the mode lights stay as they were.
+const MANUAL_BIT: u8 = 0x40;
+/// Floor for the duty at the last anchor, so a curve can never let a hot machine's fans stop (the
+/// 90 °C rule is the last resort, not the plan).
+const FAN_MIN_AT_TOP: u8 = 60;
+/// Fans slow down by at most this many points per tick, i.e. 2 per second (they speed up at once).
+/// The EC sets both duties to full whenever the mode byte is written (a mode change, say), so a short
+/// tick also keeps that blast short.
+const FAN_STEP_DOWN: u8 = 2;
+
+/// The user's fan profile: duty in percent at each of `FAN_ANCHORS`, per fan. `enabled` = the
+/// daemon drives the fans from these curves instead of the firmware.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanCurves {
+    pub enabled: bool,
+    /// Fan 1, driven by the CPU temperature.
+    pub cpu: [u8; 5],
+    /// Fan 2, driven by the GPU temperature.
+    pub gpu: [u8; 5],
+}
+
+impl Default for FanCurves {
+    fn default() -> Self {
+        Self { enabled: false, cpu: [20, 30, 45, 70, 100], gpu: [0, 25, 40, 65, 100] }
+    }
+}
+
+impl FanCurves {
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, c) in [("CPU fan", &self.cpu), ("GPU fan", &self.gpu)] {
+            if c.iter().any(|d| *d > 100) {
+                return Err(format!("{name}: duty is 0..=100 %"));
+            }
+            if c.windows(2).any(|w| w[0] > w[1]) {
+                return Err(format!("{name}: duty must not fall as the temperature rises"));
+            }
+            if c[4] < FAN_MIN_AT_TOP {
+                return Err(format!("{name}: at least {FAN_MIN_AT_TOP} % at {} °C", FAN_ANCHORS[4]));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Duty (percent) of `curve` at `temp_c`: linear between the anchors, flat outside them.
+pub fn curve_duty(curve: &[u8; 5], temp_c: f64) -> u8 {
+    let a = FAN_ANCHORS.map(f64::from);
+    if temp_c <= a[0] {
+        return curve[0];
+    }
+    for i in 1..5 {
+        if temp_c <= a[i] {
+            let (lo, hi) = (f64::from(curve[i - 1]), f64::from(curve[i]));
+            return (lo + (temp_c - a[i - 1]) / (a[i] - a[i - 1]) * (hi - lo)).round() as u8;
+        }
+    }
+    curve[4]
+}
+
+/// Set one point of a curve; the curve never falls, so the points around it move along.
+pub fn set_curve_point(curve: &mut [u8; 5], idx: usize, duty: u8) {
+    curve[idx] = duty;
+    curve[idx + 1..].iter_mut().for_each(|d| *d = (*d).max(duty));
+    curve[..idx].iter_mut().for_each(|d| *d = (*d).min(duty));
+}
+
+/// Next duty: speeding up is immediate, slowing down is `FAN_STEP_DOWN` points per tick.
+pub fn fan_smooth(prev: u8, target: u8) -> u8 {
+    if target >= prev {
+        target
+    } else {
+        prev.saturating_sub(FAN_STEP_DOWN).max(target)
+    }
+}
+
+/// Target duties (percent) `[fan 1, fan 2]` for the sensor readings. A fan whose own sensor is
+/// missing follows the other one; no sensor at all, or one at `FAN_PANIC_C`, means both flat out.
+pub fn fan_targets(cfg: &FanCurves, cpu: Option<f64>, gpu: Option<f64>) -> [u8; 2] {
+    match (cpu.or(gpu), gpu.or(cpu)) {
+        (Some(c), Some(g)) if c < FAN_PANIC_C && g < FAN_PANIC_C => [curve_duty(&cfg.cpu, c), curve_duty(&cfg.gpu, g)],
+        _ => [100, 100],
+    }
+}
+
+/// Hand the fans back to the firmware: drop the manual bit, keep the mode.
+pub fn fan_release(ec: &mut dyn EcAccess) -> HwResult<()> {
+    let byte = ec.read(addr::MAFAN_CONTROL_BYTE)?;
+    if byte & MANUAL_BIT == 0 {
+        return Ok(());
+    }
+    if is_boosted(byte) {
+        set_boost(ec, false)?; // restores the pre-boost mode, or Enthusiast (nibble 0) without a stash
+    } else {
+        ec.write(addr::MAFAN_CONTROL_BYTE, byte & !MANUAL_BIT)?;
+    }
+    Ok(())
+}
+
+/// Drives the two fans from the custom curves; call `tick` every `FAN_TICK`.
+pub struct FanEngine {
+    duty: [u8; 2],
+    /// Is the manual bit ours? Enthusiast + manual is byte 0x40, exactly the Boost byte: without
+    /// this marker a boosted byte is the user's and left alone.
+    ours: bool,
+    /// The EC sets both duties to full when the mode byte changes; wait before writing ours.
+    settle: std::time::Duration,
+}
+
+impl Default for FanEngine {
+    fn default() -> Self {
+        Self { duty: [100; 2], ours: false, settle: std::time::Duration::from_millis(500) }
+    }
+}
+
+impl FanEngine {
+    pub fn tick(&mut self, ec: &mut dyn EcAccess, cfg: &FanCurves, cpu: Option<f64>, gpu: Option<f64>) -> HwResult<()> {
+        if !cfg.enabled {
+            return self.stop(ec);
+        }
+        let byte = ec.read(addr::MAFAN_CONTROL_BYTE)?;
+        if is_boosted(byte) && !self.ours {
+            return Ok(());
+        }
+        if !self.ours {
+            // start from what the firmware is doing now, so taking over does not jerk the fans
+            self.duty = [duty_from_ec(ec.fan_duty(1)?), duty_from_ec(ec.fan_duty(2)?)];
+        }
+        let target = fan_targets(cfg, cpu, gpu);
+        for (d, t) in self.duty.iter_mut().zip(target) {
+            *d = fan_smooth(*d, t);
+        }
+        if byte & MANUAL_BIT == 0 {
+            ec.write(addr::MAFAN_CONTROL_BYTE, byte | MANUAL_BIT)?;
+            std::thread::sleep(self.settle);
+        }
+        self.ours = true;
+        for (fan, d) in [1u8, 2].into_iter().zip(self.duty) {
+            let raw = duty_to_ec(d);
+            if ec.fan_duty(fan)? != raw {
+                ec.set_fan_duty(fan, raw)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Give the fans back to the firmware, if they are ours.
+    pub fn stop(&mut self, ec: &mut dyn EcAccess) -> HwResult<()> {
+        if self.ours {
+            fan_release(ec)?;
+            self.ours = false;
+        }
+        Ok(())
+    }
+}
+
+/// CPU and GPU temperature (°C) out of the hwmon readings, by label, else by position.
+fn cpu_gpu_temps(s: &crate::linux::Sensors) -> (Option<f64>, Option<f64>) {
+    let by = |name: &str, pos: usize| {
+        let hit = s.temps.iter().find(|(l, _)| l.to_ascii_uppercase().contains(name)).or_else(|| s.temps.get(pos));
+        hit.map(|(_, mv)| f64::from(*mv) / 1000.0)
+    };
+    (by("CPU", 0), by("GPU", 1))
+}
+
+/// The engine's main loop (the daemon runs it in a thread): every tick, read the saved profile and
+/// the sensors and drive the fans. Without the uniwill hwmon driver there are no sensors to go by,
+/// so the fans stay with the firmware. Hands the fans back when `stop` is set.
+pub fn fan_loop(stop: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut ec = match crate::linux::open_auto() {
+        Ok(ec) => ec,
+        Err(e) => return eprintln!("fan engine: {e}"),
+    };
+    let Ok(sysfs) = SysfsEc::probe() else {
+        return eprintln!("fan engine: no uniwill hwmon (kernel driver not loaded), fans stay with the firmware");
+    };
+    let mut engine = FanEngine::default();
+    let mut last_err = String::new(); // a persistent error is reported once, not every tick
+    while !stop.load(Relaxed) {
+        let cfg = Config::load().fan;
+        let (cpu, gpu) = sysfs.sensors().map_or((None, None), |s| cpu_gpu_temps(&s));
+        match engine.tick(ec.as_mut(), &cfg, cpu, gpu) {
+            Ok(()) => last_err.clear(),
+            Err(e) if e.to_string() != last_err => {
+                last_err = e.to_string();
+                eprintln!("fan engine: {last_err}");
+            }
+            Err(_) => {}
+        }
+        std::thread::sleep(FAN_TICK);
+    }
+    let _ = engine.stop(ec.as_mut());
 }
 
 // ---------------------------------------------------------------- mode button
