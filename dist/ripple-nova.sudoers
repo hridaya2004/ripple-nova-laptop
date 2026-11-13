@@ -1,10 +1,11 @@
 # Installed by Ripple Control Center's install.sh. Lets @USER@ open the window as root WITHOUT a
 # password (the app needs root for the EC). It grants exactly these commands and nothing else: no other
-# binary, no other arguments, and no SETENV, so the environment cannot be used to inject code. The binaries
-# are root-owned. Plus exactly three `rcc touchpad` commands (power the touchpad on / off / the other one)
-# and exactly three `rcc mode set` commands (the tray icon's performance profile shortcut).
+# binary, no other arguments, and no SETENV, so the environment cannot be used to inject code. Both
+# binaries are root-owned (the second is the copy "Open at login" makes). Plus exactly three `rcc touchpad`
+# commands (power the touchpad on / off / the other one) and exactly three `rcc mode set` commands (the tray
+# icon's profile shortcut).
 # Remove it with ./install.sh --uninstall, or delete this file: the launcher then asks polkit again.
-Cmnd_Alias RIPPLE_GUI = @BINDIR@/rcc-gui ""
+Cmnd_Alias RIPPLE_GUI = @BINDIR@/rcc-gui "", /usr/local/lib/ripple-nova/rcc-gui ""
 # the four display variables, for these commands only, so the window can open on your desktop
 Defaults!RIPPLE_GUI env_keep += "WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XAUTHORITY"
 # the touchpad switch, so a keyboard shortcut can bring the touchpad back when there is no pointer to click with

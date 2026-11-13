@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Ripple Control Center (tray icon)
-Comment=Tray icon for Ripple Control Center: click to open the window
-Exec=@BINDIR@/rcc-tray
-Icon=ripple-nova
-Terminal=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true

@@ -19,7 +19,7 @@ on a real laptop.
 | `rcc` | command line: `rcc doctor`, `status`, `mode`, `fan`, `rgb`, `battery`, `system`, `touchpad`, `ec` (raw EC access, for development) |
 | `rcc-gui` | the window (GPUI): profiles, fans, keyboard, toggles, settings. Needs root; started through `ripple-nova` |
 | `ripple-nova.service` | root daemon (`rcc watch`): follows the hardware mode button, restores the profile at boot, runs the custom fan profile, sends the popups |
-| `rcc-tray` | tray icon (runs as you, autostarts at login): a click opens the window, the menu switches the performance profile. GNOME needs the AppIndicator extension |
+| `rcc-tray` | tray icon (runs as you; started by the window, and at login when *Open at login* is on): a click opens the window, the menu switches the performance profile. GNOME needs the AppIndicator extension |
 | `ripple-nova` | launcher for the window (menu entry "Ripple Control Center") |
 | `vendor/uniwill-laptop` | the kernel driver the sensors, LEDs and toggles come from, [vendored in this repository](#the-uniwill-laptop-driver) |
 
@@ -54,12 +54,14 @@ on a real laptop.
   which the sudoers rule allows without a password, for instance from a keyboard shortcut). AC Auto-Boot, USB
   powershare, the firmware's Touchpad toggle and Touchpad power are marked *experimental*. Breathing in suspend is a
   lightbar feature: it only shows on a machine whose EC reports a lightbar.
-- **Tray**: the tray icon is the only thing that starts at login; click it to open the window. Its menu has a
-  **Performance profile** shortcut (the current profile ticked, "service not running" when the daemon is down). Without
-  the sudoers rule, polkit asks for a password instead.
+- **Tray**: click the icon to open the window. Its menu has a **Performance profile** shortcut (the current profile
+  ticked, "service not running" when the daemon is down). Without the sudoers rule, polkit asks for a password instead.
+  The window starts the tray icon too, and so does login when *Open at login* is on.
 - **Popups** (any freedesktop notification daemon): when the profile, fan boost or a toggle changes, whoever changed it
   (window, hardware button, Fn key, CLI). Optional: System → Toggles → *Show popup*.
 - **Window**: dark/light theme, font, no password prompt. Closing the window ends it; the tray icon opens it again.
+- **Startup**: *Open at login* (Settings) starts the window and the tray icon when you log in; with *Start minimized*
+  on, only the tray icon starts and the window opens from it. The service always starts at boot, whatever these say.
 - **CLI** for all of the above, plus battery charge *profiles* (Standard / Trickle / Long Life).
 
 **Not implemented:**
@@ -115,9 +117,11 @@ git clone <this repository> && cd ripple-nova
 ```
 
 It builds the Rust workspace (release), builds the `uniwill-laptop` kernel module for the running kernel, and
-installs: `rcc`, `rcc-gui`, `rcc-tray`, `ripple-nova` (to `/usr/local/bin`), the menu entry and icon, the tray's
-autostart entry (and starts the tray for your session), `ripple-nova.service` (enabled and started), a module-load
-list (`acpi_call`, `uniwill-laptop`), a modprobe option (`force=1`, see below) and the sudoers rule. Options:
+installs: `rcc`, `rcc-gui`, `rcc-tray`, `ripple-nova` (to `/usr/local/bin`), the menu entry and icon,
+`ripple-nova.service` (enabled and started), a module-load list (`acpi_call`, `uniwill-laptop`), a modprobe option
+(`force=1`, see below) and the sudoers rule. It does **not** turn on starting at login: that is *Open at login* in
+Settings (and an install removes the always-on tray login entry that older versions put in `/etc/xdg/autostart`).
+Options:
 
 | Flag | Effect |
 |---|---|
@@ -127,7 +131,7 @@ list (`acpi_call`, `uniwill-laptop`), a modprobe option (`force=1`, see below) a
 | `DESTDIR=/dir ./install.sh` | stage the files under `/dir`, touching neither the system nor systemd |
 
 Then open **Ripple Control Center** from the menu (or run `ripple-nova`), and check `sudo rcc doctor`.
-The tray icon starts at every login; click it to open the window. Settings live in `/etc/ripple-nova/`.
+To have the app start at login, switch on *Open at login* in Settings. Settings live in `/etc/ripple-nova/`.
 
 **Popups and Do Not Disturb**: GNOME keeps banners away while Do Not Disturb is on; the notification still lands
 in the tray.
@@ -169,14 +173,15 @@ The window needs root (EC access), and the stock answer is a polkit password dia
 `install.sh` writes `/etc/sudoers.d/ripple-nova` (validated with `visudo` first, mode 0440) that lets **your user
 start the window as root without a password**. It grants exactly:
 
-- `/usr/local/bin/rcc-gui` with no arguments (root-owned),
+- `/usr/local/bin/rcc-gui` with no arguments, and the root-owned copy of it that *Open at login* installs
+  (`/usr/local/lib/ripple-nova/rcc-gui`, also with no arguments),
 - `rcc touchpad on`, `off` and `toggle`, and `rcc mode set balanced`, `enthusiast` and `overboost` (the tray icon's
   profile shortcut): these exact commands, no other arguments, no `custom`,
 - with the four display variables (`WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XAUTHORITY`) kept for the window
   command only, and **no `SETENV`** (that would allow `LD_PRELOAD` and amount to full root).
 
 What that means: any process running as you can start the window as root and drive it (EC settings, the files in
-`/etc/ripple-nova`), and switch the profile or the touchpad, but cannot run anything else as root through it. It is a
+`/etc/ripple-nova`, the login entry), and switch the profile or the touchpad, but cannot run anything else as root through it. It is a
 convenience with a real, bounded cost: if you do not want it, use `./install.sh --no-sudoers`, or remove it later
 with `sudo rm /etc/sudoers.d/ripple-nova`. The launcher then falls back to polkit.
 

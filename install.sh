@@ -11,8 +11,8 @@
 # without a password through a sudoers rule that allows exactly rcc-gui for you, else through polkit)
 # + a menu entry and icon, the systemd service ripple-nova.service (runs `rcc watch` as root: follows
 # the mode button, keeps the profile and the button lights in sync, runs the custom fan profile, sends the
-# popups), the tray icon helper rcc-tray (autostarts in your session; GNOME needs its AppIndicator extension
-# to show it), and
+# popups), the tray icon helper rcc-tray (starts with the window, and at login when Settings > Open at login is
+# on; GNOME needs its AppIndicator extension to show it), and
 # the module list that loads acpi_call and uniwill-laptop at boot, and the uniwill-laptop kernel module
 # itself, built from vendor/uniwill-laptop (a git subtree of Wer-Wolf/uniwill-laptop) for the running kernel
 # into /usr/lib/modules/<kernel>/updates/. It has to be rebuilt after a kernel update: run this again.
@@ -53,7 +53,7 @@ uninstall() {
         "$DESTDIR/etc/xdg/autostart/ripple-nova.desktop" \
         "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop" \
         "$DESTDIR"/usr/lib/modules/*/updates/uniwill-laptop.ko
-    $SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"   # what older versions' "Open at login" left (the window itself)
+    $SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"   # the app's own open-at-login copy
     live && { systemctl --user stop ripple-nova-tray 2>/dev/null; pkill -x rcc-tray 2>/dev/null; true; }   # the icon helper runs as you (not running is fine)
     live && $SUDO systemctl daemon-reload
     live && $SUDO depmod -a   # forget the out-of-tree uniwill-laptop (the kernel's own one is used again)
@@ -124,17 +124,13 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 sed "s|@BINDIR@|$BINDIR|g" dist/ripple-nova.service > "$tmp/unit"
 sed "s|@BINDIR@|$BINDIR|g" dist/ripple-nova > "$tmp/launcher"
-sed "s|@BINDIR@|$BINDIR|g" dist/ripple-nova-tray.desktop > "$tmp/tray.desktop"
 
 say "installing"
 $SUDO install -Dm755 target/release/rcc "$DESTDIR$BINDIR/rcc"
 $SUDO install -Dm755 target/release/rcc-gui "$DESTDIR$BINDIR/rcc-gui"
 $SUDO install -Dm755 target/release/rcc-tray "$DESTDIR$BINDIR/rcc-tray"
-$SUDO install -Dm644 "$tmp/tray.desktop" "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop"
-# Only the tray icon starts at login now. Older versions had "Open at login" (the window itself, minimized):
-# remove its login entry and its root-owned copy, or the window would still open at every login.
-$SUDO rm -f "$DESTDIR/etc/xdg/autostart/ripple-nova.desktop"
-$SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"
+# Older versions started the tray at every login through this entry; now only Settings > Open at login does.
+$SUDO rm -f "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop"
 $SUDO install -Dm755 "$tmp/launcher" "$DESTDIR$BINDIR/ripple-nova"
 $SUDO install -Dm644 dist/ripple-nova.desktop "$DESTDIR$PREFIX/share/applications/ripple-nova.desktop"
 $SUDO install -Dm644 dist/ripple-nova.svg "$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps/ripple-nova.svg"
@@ -167,12 +163,22 @@ fi
 if live; then
     command -v update-desktop-database >/dev/null && $SUDO update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
     command -v gtk-update-icon-cache >/dev/null && $SUDO gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
-    say "starting the tray icon helper (it waits until the desktop has a tray)"
-    systemctl --user stop ripple-nova-tray 2>/dev/null || true
-    pkill -x rcc-tray 2>/dev/null || true
-    # its own transient user service, not a child of this terminal (closing the terminal killed it); the window
-    # starts it too when it is not running, and the autostart entry does at every login
-    systemd-run --user --quiet --collect --unit=ripple-nova-tray "$BINDIR/rcc-tray" 2>/dev/null || setsid -f "$BINDIR/rcc-tray" >/dev/null 2>&1 || true
+    # "Open at login" keeps its own root-owned copy of the window and a login script (so the build directory
+    # is never what runs as root). They go stale when this script installs a newer build: an old copy would
+    # start at the next login with its own popups and no control socket. Refresh them from the new binary.
+    if [ -e /etc/xdg/autostart/ripple-nova.desktop ]; then
+        say "refreshing the open-at-login copy of the window"
+        $SUDO "$BINDIR/rcc-gui" --autostart on >/dev/null || warn "could not refresh the open-at-login copy: run  sudo $BINDIR/rcc-gui --autostart on"
+    fi
+    # The tray helper runs as you. Restart it to pick up the new build, but only when it was running or the login
+    # entry is on: with Open at login off nothing but the window starts it.
+    if pgrep -x rcc-tray >/dev/null 2>&1 || [ -e /etc/xdg/autostart/ripple-nova.desktop ]; then
+        say "restarting the tray icon helper (it waits until the desktop has a tray)"
+        systemctl --user stop ripple-nova-tray 2>/dev/null || true
+        pkill -x rcc-tray 2>/dev/null || true
+        # its own transient user service, not a child of this terminal (closing the terminal killed it)
+        systemd-run --user --quiet --collect --unit=ripple-nova-tray "$BINDIR/rcc-tray" 2>/dev/null || setsid -f "$BINDIR/rcc-tray" >/dev/null 2>&1 || true
+    fi
     say "starting the daemon"
     [ -n "$KO" ] && $SUDO depmod -a
     $SUDO modprobe acpi_call 2>/dev/null || true
@@ -202,7 +208,8 @@ cat <<MSG
 Installed.
   daemon   ripple-nova.service (root), follows the mode button   journalctl -u $UNIT
   window   ripple-nova   (menu: Ripple Control Center), $window
-  tray     rcc-tray (autostarts at login, the only thing that does; its menu switches the performance profile).
+  tray     rcc-tray, started by the window; Settings > Open at login starts it at login (with the window, or
+           alone with Start minimized). Its menu switches the performance profile.
            GNOME shows it only with the AppIndicator extension:
            sudo pacman -S gnome-shell-extension-appindicator, then log out and in
   cli      sudo rcc doctor | status | mode get|set|next
