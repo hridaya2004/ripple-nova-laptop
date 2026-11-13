@@ -163,6 +163,13 @@ fi
 if live; then
     command -v update-desktop-database >/dev/null && $SUDO update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
     command -v gtk-update-icon-cache >/dev/null && $SUDO gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+    # "Open at login" keeps its own root-owned copy of the window and a login script (so the build directory
+    # is never what runs as root). They go stale when this script installs a newer build: an old copy would
+    # start at the next login with its own popups and no control socket. Refresh them from the new binary.
+    if [ -e /etc/xdg/autostart/ripple-nova.desktop ]; then
+        say "refreshing the open-at-login copy of the window"
+        $SUDO "$BINDIR/rcc-gui" --autostart on >/dev/null || warn "could not refresh the open-at-login copy: run  sudo $BINDIR/rcc-gui --autostart on"
+    fi
     say "starting the tray icon helper (it waits until the desktop has a tray)"
     pkill -x rcc-tray 2>/dev/null || true
     setsid -f "$BINDIR/rcc-tray" >/dev/null 2>&1 || true
