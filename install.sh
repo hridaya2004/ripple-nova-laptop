@@ -54,7 +54,7 @@ uninstall() {
         "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop" \
         "$DESTDIR"/usr/lib/modules/*/updates/uniwill-laptop.ko
     $SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"   # the app's own open-at-login copy
-    live && { pkill -x rcc-tray 2>/dev/null || true; }   # the icon helper runs as you (no process is fine)
+    live && { systemctl --user stop ripple-nova-tray 2>/dev/null; pkill -x rcc-tray 2>/dev/null; true; }   # the icon helper runs as you (not running is fine)
     live && $SUDO systemctl daemon-reload
     live && $SUDO depmod -a   # forget the out-of-tree uniwill-laptop (the kernel's own one is used again)
     say "removed. Your settings stay in /etc/ripple-nova (delete it to forget them)."
@@ -171,8 +171,11 @@ if live; then
         $SUDO "$BINDIR/rcc-gui" --autostart on >/dev/null || warn "could not refresh the open-at-login copy: run  sudo $BINDIR/rcc-gui --autostart on"
     fi
     say "starting the tray icon helper (it waits until the desktop has a tray)"
+    systemctl --user stop ripple-nova-tray 2>/dev/null || true
     pkill -x rcc-tray 2>/dev/null || true
-    setsid -f "$BINDIR/rcc-tray" >/dev/null 2>&1 || true
+    # its own transient user service, not a child of this terminal (closing the terminal killed it); the window
+    # starts it too when it is not running, and the autostart entry does at every login
+    systemd-run --user --quiet --collect --unit=ripple-nova-tray "$BINDIR/rcc-tray" 2>/dev/null || setsid -f "$BINDIR/rcc-tray" >/dev/null 2>&1 || true
     say "starting the daemon"
     [ -n "$KO" ] && $SUDO depmod -a
     $SUDO modprobe acpi_call 2>/dev/null || true
