@@ -10,8 +10,8 @@ use ripple_hw::control::{self, Config, Hsv, Preset, Profile};
 use ripple_hw::{EcAccess, HwError};
 
 use crate::{
-    Backend, BatteryCmd, Cli, CurveCmd, CustomFanCmd, DisplayCmd, EcCmd, FanCmd, ModeChoice, ModeCmd, PowerCmd,
-    ProfileChoice, RgbCmd, SystemCmd,
+    Backend, BatteryCmd, Cli, CurveCmd, CustomFanCmd, DisplayCmd, EcCmd, FanCmd, ModeChoice,
+    ModeCmd, PowerCmd, ProfileChoice, RgbCmd, SystemCmd,
 };
 
 pub type CmdResult = Result<(), String>;
@@ -41,12 +41,8 @@ fn open_ec(cli: &Cli) -> Result<Box<dyn EcAccess>, String> {
         Backend::Acpi => Ok(Box::new(
             ripple_hw::linux::AcpiCallEc::probe().map_err(err)?,
         )),
-        Backend::Wmi => Ok(Box::new(
-            ripple_hw::linux::WmiEc::probe().map_err(err)?,
-        )),
-        Backend::Sysfs => Ok(Box::new(
-            ripple_hw::linux::SysfsEc::probe().map_err(err)?,
-        )),
+        Backend::Wmi => Ok(Box::new(ripple_hw::linux::WmiEc::probe().map_err(err)?)),
+        Backend::Sysfs => Ok(Box::new(ripple_hw::linux::SysfsEc::probe().map_err(err)?)),
         Backend::Auto => ripple_hw::linux::open_auto().map_err(err),
     }
 }
@@ -103,7 +99,10 @@ fn model_dir(cli: &Cli, explicit: Option<String>) -> Result<PathBuf, String> {
     };
     let dir = oem.join("UserFanTables").join(&model);
     if !dir.is_dir() {
-        return Err(format!("no OEM fan tables for model '{model}' at {}", dir.display()));
+        return Err(format!(
+            "no OEM fan tables for model '{model}' at {}",
+            dir.display()
+        ));
     }
     Ok(dir)
 }
@@ -162,7 +161,9 @@ fn doctor(cli: &Cli) -> CmdResult {
     // The ITE HID keyboard is only a question when the EC does not drive the backlight itself.
     let ec_rgb = open_ec(cli).is_ok_and(|mut ec| control::has_keyboard_rgb(ec.as_mut()));
     let hid_res = match probe_hid() {
-        Err(_) if ec_rgb => Ok("not needed: the EC drives the keyboard backlight (EC 1897-1899)".to_string()),
+        Err(_) if ec_rgb => {
+            Ok("not needed: the EC drives the keyboard backlight (EC 1897-1899)".to_string())
+        }
         r => r,
     };
 
@@ -187,7 +188,10 @@ fn doctor(cli: &Cli) -> CmdResult {
         if e.contains("sudo") || e.contains("permission") {
             fixes.push("  → run rcc with sudo (writing /proc/acpi/call requires root)".into());
         } else if e.contains("ECRR") {
-            fixes.push("  → method discovery failed: no device on this DSDT answered to <path>.ECRR".into());
+            fixes.push(
+                "  → method discovery failed: no device on this DSDT answered to <path>.ECRR"
+                    .into(),
+            );
             fixes.push("    (the paths actually tried are listed in the error above)".into());
         }
         match module_path("acpi_call") {
@@ -205,36 +209,55 @@ fn doctor(cli: &Cli) -> CmdResult {
                         "  install:  git clone https://github.com/mkottman/acpi_call && cd acpi_call && make".into(),
                     ),
                 }
-                fixes.push("  load:     sudo modprobe acpi_call          # creates /proc/acpi/call".into());
+                fixes.push(
+                    "  load:     sudo modprobe acpi_call          # creates /proc/acpi/call".into(),
+                );
             }
         }
         fixes.push("  source:   https://github.com/mkottman/acpi_call".into());
         fixes.push(String::new());
     }
     if sysfs_res.is_err() {
-        fixes.push("uniwill-laptop kernel driver (hwmon temps/fans, charge limit, lightbar, hotkeys):".into());
+        fixes.push(
+            "uniwill-laptop kernel driver (hwmon temps/fans, charge limit, lightbar, hotkeys):"
+                .into(),
+        );
         if module_loaded("uniwill-laptop") {
-            fixes.push("  loaded, but no hwmon device → DMI whitelist may not cover this machine:".into());
+            fixes.push(
+                "  loaded, but no hwmon device → DMI whitelist may not cover this machine:".into(),
+            );
             fixes.push("  try:     sudo modprobe uniwill-laptop force=1    # testing only".into());
         } else if let Some(p) = module_path("uniwill-laptop") {
-            fixes.push(format!("  present ({p}) → run: sudo modprobe uniwill-laptop"));
-            fixes.push("  no hwmon after load? → sudo modprobe uniwill-laptop force=1 (DMI whitelist)".into());
+            fixes.push(format!(
+                "  present ({p}) → run: sudo modprobe uniwill-laptop"
+            ));
+            fixes.push(
+                "  no hwmon after load? → sudo modprobe uniwill-laptop force=1 (DMI whitelist)"
+                    .into(),
+            );
         } else if kernel_ver.is_some_and(|v| v < (6, 19)) {
             fixes.push(format!(
                 "  kernel {kernel_rel} < 6.19 → driver is mainline since 6.19; upgrade the kernel"
             ));
             fixes.push("  or build out-of-tree: https://github.com/Wer-Wolf/uniwill-laptop".into());
         } else {
-            fixes.push("  module missing on a ≥6.19 kernel → CONFIG_X86_PLATFORM_DRIVERS_UNIWILL not set?".into());
+            fixes.push(
+                "  module missing on a ≥6.19 kernel → CONFIG_X86_PLATFORM_DRIVERS_UNIWILL not set?"
+                    .into(),
+            );
             fixes.push("  check:   grep UNIWILL /boot/config-$(uname -r)   # or: zgrep UNIWILL /proc/config.gz".into());
         }
-        fixes.push("  docs:    https://docs.kernel.org/admin-guide/laptops/uniwill-laptop.html".into());
+        fixes.push(
+            "  docs:    https://docs.kernel.org/admin-guide/laptops/uniwill-laptop.html".into(),
+        );
         fixes.push(String::new());
     }
     if let Err(e) = &hid_res {
         fixes.push("RGB keyboard: neither the EC nor an ITE (048D) controller reports one:".into());
         fixes.push(format!("  {e}"));
-        fixes.push("  ITE protocol: https://github.com/rodgomesc/avell-unofficial-control-center".into());
+        fixes.push(
+            "  ITE protocol: https://github.com/rodgomesc/avell-unofficial-control-center".into(),
+        );
         fixes.push(String::new());
     }
     let had_fixes = !fixes.is_empty();
@@ -253,7 +276,10 @@ fn doctor(cli: &Cli) -> CmdResult {
     match open_ec(cli) {
         Ok(mut ec) => {
             println!("  backend     : {}", ec.name());
-            println!("  model       : {}", ripple_hw::linux::detect_model(Some(ec.as_mut())));
+            println!(
+                "  model       : {}",
+                ripple_hw::linux::detect_model(Some(ec.as_mut()))
+            );
             if let Ok(s1) = ec.read(addr::SUPPORT_BYTE1) {
                 println!("  support[1]  : {s1:#010b}");
             }
@@ -358,11 +384,19 @@ fn distro_family() -> Option<String> {
     }
     let all = format!("{id} {like}").to_lowercase();
     let toks: Vec<&str> = all.split_whitespace().collect();
-    if toks.iter().any(|t| matches!(*t, "arch" | "archlinux" | "manjaro" | "endeavouros" | "cachyos")) {
+    if toks.iter().any(|t| {
+        matches!(
+            *t,
+            "arch" | "archlinux" | "manjaro" | "endeavouros" | "cachyos"
+        )
+    }) {
         return Some("arch".into());
     }
     if toks.iter().any(|t| {
-        matches!(*t, "debian" | "ubuntu" | "linuxmint" | "pop" | "raspbian" | "elementary")
+        matches!(
+            *t,
+            "debian" | "ubuntu" | "linuxmint" | "pop" | "raspbian" | "elementary"
+        )
     }) {
         return Some("debian".into());
     }
@@ -371,7 +405,11 @@ fn distro_family() -> Option<String> {
 
 /// `modinfo -n <name>` → module file path (works for builtin modules too).
 fn module_path(name: &str) -> Option<String> {
-    let out = std::process::Command::new("modinfo").arg("-n").arg(name).output().ok()?;
+    let out = std::process::Command::new("modinfo")
+        .arg("-n")
+        .arg(name)
+        .output()
+        .ok()?;
     if out.status.success() {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !s.is_empty() {
@@ -386,9 +424,8 @@ fn module_loaded(name: &str) -> bool {
     let target = name.replace('-', "_");
     std::fs::read_dir("/sys/module")
         .map(|rd| {
-            rd.flatten().any(|e| {
-                e.file_name().to_string_lossy().replace('-', "_") == target
-            })
+            rd.flatten()
+                .any(|e| e.file_name().to_string_lossy().replace('-', "_") == target)
         })
         .unwrap_or(false)
 }
@@ -409,7 +446,10 @@ fn status(cli: &Cli) -> CmdResult {
     // Raw control bytes only in debug builds.
     if cfg!(debug_assertions) {
         if let Ok(b) = ec.read(addr::MAFAN_CONTROL_BYTE) {
-            println!("  [debug] fan control byte: {b:#04x} ({})", fan_mode_name(b));
+            println!(
+                "  [debug] fan control byte: {b:#04x} ({})",
+                fan_mode_name(b)
+            );
         }
     }
 
@@ -475,8 +515,12 @@ fn status(cli: &Cli) -> CmdResult {
                     println!(
                         "  {:5} PL1={:>4} PL2={:>4} TCC={:>3} activated={}",
                         t.Name,
-                        t.pl1().map(|v| v.to_string()).unwrap_or_else(|| "NA".into()),
-                        t.pl2().map(|v| v.to_string()).unwrap_or_else(|| "NA".into()),
+                        t.pl1()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "NA".into()),
+                        t.pl2()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "NA".into()),
                         t.TCC.as_deref().unwrap_or("-"),
                         t.Activated
                     );
@@ -565,12 +609,24 @@ fn preset_of(stock: &[Preset; 3], cfg: &Config, p: Profile) -> Preset {
 }
 
 /// Apply a profile; prints what was written.
-fn apply_profile(ec: &mut dyn EcAccess, cli: &Cli, stock: &[Preset; 3], cfg: &Config, p: Profile) -> CmdResult {
+fn apply_profile(
+    ec: &mut dyn EcAccess,
+    cli: &Cli,
+    stock: &[Preset; 3],
+    cfg: &Config,
+    p: Profile,
+) -> CmdResult {
     let pr = preset_of(stock, cfg, p);
     let sysfs = uniwill(cli).ok();
     control::apply(ec, sysfs.as_ref(), pr)?;
     control::set_mode_byte(ec, p)?; // the button's mode lights (0/1/2) + the EC's fan profile
-    println!("mode → {} (PL1 {} W, PL2 {} W, GPU cTGP +{} W)", p.name().to_lowercase(), pr.pl1, pr.pl2, pr.ctgp);
+    println!(
+        "mode → {} (PL1 {} W, PL2 {} W, GPU cTGP +{} W)",
+        p.name().to_lowercase(),
+        pr.pl1,
+        pr.pl2,
+        pr.ctgp
+    );
     if sysfs.is_none() && pr.ctgp > 0 {
         println!("note: uniwill kernel driver not available, GPU cTGP not applied");
     }
@@ -585,7 +641,10 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
         ModeCmd::Get => {
             let (pl1, pl2) = (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?);
             match control::current(ec.as_mut(), &stock, &cfg.custom)? {
-                Some(p) => println!("mode: {} (PL1 {pl1} W, PL2 {pl2} W)", p.name().to_lowercase()),
+                Some(p) => println!(
+                    "mode: {} (PL1 {pl1} W, PL2 {pl2} W)",
+                    p.name().to_lowercase()
+                ),
                 None => println!("mode: unknown (PL1 {pl1} W, PL2 {pl2} W matches no profile)"),
             }
             Ok(())
@@ -604,7 +663,11 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
             apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur))
         }
         ModeCmd::Custom { pl1, pl2, ctgp } => {
-            let pr = Preset { pl1: *pl1, pl2: *pl2, ctgp: *ctgp };
+            let pr = Preset {
+                pl1: *pl1,
+                pl2: *pl2,
+                ctgp: *ctgp,
+            };
             pr.validate()?;
             cfg.custom = pr;
             cfg.save()?;
@@ -749,12 +812,26 @@ fn touchpad(choice: crate::TouchpadChoice) -> CmdResult {
         Off => false,
         Toggle => !now,
         Status => {
-            println!("touchpad: {}", if now { "on" } else { "off (powered down, LED on)" });
+            println!(
+                "touchpad: {}",
+                if now {
+                    "on"
+                } else {
+                    "off (powered down, LED on)"
+                }
+            );
             return Ok(());
         }
     };
     control::set_touchpad(want)?;
-    println!("touchpad: {}", if want { "on" } else { "off (powered down, LED on)" });
+    println!(
+        "touchpad: {}",
+        if want {
+            "on"
+        } else {
+            "off (powered down, LED on)"
+        }
+    );
     Ok(())
 }
 
@@ -762,13 +839,22 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
     let mut cfg = Config::load();
     match cmd {
         CustomFanCmd::Show => {
-            let anchors: Vec<String> = control::FAN_ANCHORS.iter().map(|t| format!("{t:>4}")).collect();
+            let anchors: Vec<String> = control::FAN_ANCHORS
+                .iter()
+                .map(|t| format!("{t:>4}"))
+                .collect();
             let row = |d: &[u8; 5]| d.iter().map(|d| format!("{d:>4}")).collect::<String>();
-            println!("custom fan profile: {}", if cfg.fan.enabled { "on" } else { "off" });
+            println!(
+                "custom fan profile: {}",
+                if cfg.fan.enabled { "on" } else { "off" }
+            );
             println!("  °C            {}", anchors.concat());
             println!("  fan 1 (CPU) % {}", row(&cfg.fan.cpu));
             println!("  fan 2 (GPU) % {}", row(&cfg.fan.gpu));
-            println!("  (linear between the points; at {} °C or with no sensor both fans run at 100 %)", control::FAN_PANIC_C);
+            println!(
+                "  (linear between the points; at {} °C or with no sensor both fans run at 100 %)",
+                control::FAN_PANIC_C
+            );
         }
         CustomFanCmd::On => {
             cfg.fan.enabled = true;
@@ -776,11 +862,16 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
             cfg.save()?;
             // the engine leaves a boost alone, so end it first or the profile would never take over
             if let Ok(mut ec) = open_ec(cli) {
-                if ec.read(addr::MAFAN_CONTROL_BYTE).is_ok_and(control::is_boosted) {
+                if ec
+                    .read(addr::MAFAN_CONTROL_BYTE)
+                    .is_ok_and(control::is_boosted)
+                {
                     control::fan_release(ec.as_mut())?;
                 }
             }
-            println!("custom fan profile on: the ripple-nova service applies it within a few seconds");
+            println!(
+                "custom fan profile on: the ripple-nova service applies it within a few seconds"
+            );
         }
         CustomFanCmd::Off => {
             cfg.fan.enabled = false;
@@ -789,7 +880,10 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
             println!("custom fan profile off, fans handed back to the firmware");
         }
         CustomFanCmd::Set { cpu, gpu } => {
-            let arr = |v: &Vec<u8>| <[u8; 5]>::try_from(v.as_slice()).map_err(|_| "need exactly five values".to_string());
+            let arr = |v: &Vec<u8>| {
+                <[u8; 5]>::try_from(v.as_slice())
+                    .map_err(|_| "need exactly five values".to_string())
+            };
             let mut new = cfg.fan.clone();
             if let Some(v) = cpu {
                 new.cpu = arr(v)?;
@@ -803,7 +897,10 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
             println!("curves saved (on at {:?} °C)", control::FAN_ANCHORS);
         }
         CustomFanCmd::Reset => {
-            cfg.fan = control::FanCurves { enabled: cfg.fan.enabled, ..control::FanCurves::default() };
+            cfg.fan = control::FanCurves {
+                enabled: cfg.fan.enabled,
+                ..control::FanCurves::default()
+            };
             cfg.save()?;
             println!("curves back to the default preset");
         }
@@ -836,12 +933,20 @@ fn power(cli: &Cli, cmd: &PowerCmd) -> CmdResult {
         PowerCmd::Pl1 { watts } | PowerCmd::Pl2 { watts } => {
             let is_pl1 = matches!(cmd, PowerCmd::Pl1 { .. });
             let w = u8::try_from(*watts).map_err(|_| format!("{watts} W is out of range"))?;
-            let (reg, other) = if is_pl1 { (addr::PL1_SETTING, addr::PL2_SETTING) } else { (addr::PL2_SETTING, addr::PL1_SETTING) };
+            let (reg, other) = if is_pl1 {
+                (addr::PL1_SETTING, addr::PL2_SETTING)
+            } else {
+                (addr::PL2_SETTING, addr::PL1_SETTING)
+            };
             let other = ec.read(other)?;
             let (pl1, pl2) = if is_pl1 { (w, other) } else { (other, w) };
             Preset { pl1, pl2, ctgp: 0 }.validate()?; // 5..=ceiling, PL1 <= PL2
             ec.write_verified(reg, w)?;
-            println!("PL{} → {w} W (readback {} W)", if is_pl1 { 1 } else { 2 }, ec.read(reg)?);
+            println!(
+                "PL{} → {w} W (readback {} W)",
+                if is_pl1 { 1 } else { 2 },
+                ec.read(reg)?
+            );
             Ok(())
         }
         PowerCmd::Tcc { offset } => {
@@ -919,13 +1024,31 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
         RgbCmd::Effects => {
             use ripple_core::rgb::Effect;
             const ALL: [Effect; 25] = [
-                Effect::Single, Effect::Breathing, Effect::Wave, Effect::Reactive,
-                Effect::Rainbow, Effect::Ripple, Effect::Raindrop, Effect::Neon,
-                Effect::Marquee, Effect::Stack, Effect::Impact, Effect::Spark,
-                Effect::Aurora, Effect::Music, Effect::UserMode, Effect::Gaming,
-                Effect::Flash, Effect::Mix, Effect::RippleO, Effect::Alphabet,
-                Effect::StarHitting, Effect::StarSpark, Effect::Thinking,
-                Effect::Manual, Effect::BatteryPercent,
+                Effect::Single,
+                Effect::Breathing,
+                Effect::Wave,
+                Effect::Reactive,
+                Effect::Rainbow,
+                Effect::Ripple,
+                Effect::Raindrop,
+                Effect::Neon,
+                Effect::Marquee,
+                Effect::Stack,
+                Effect::Impact,
+                Effect::Spark,
+                Effect::Aurora,
+                Effect::Music,
+                Effect::UserMode,
+                Effect::Gaming,
+                Effect::Flash,
+                Effect::Mix,
+                Effect::RippleO,
+                Effect::Alphabet,
+                Effect::StarHitting,
+                Effect::StarSpark,
+                Effect::Thinking,
+                Effect::Manual,
+                Effect::BatteryPercent,
             ];
             for e in ALL.iter() {
                 println!("{:>2}  {}", *e as u8, e.name());
@@ -956,7 +1079,13 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
                 Some(h) => h,
                 None => Hsv::from_levels(control::keyboard_rgb(ec.as_mut())?),
             };
-            set_keyboard(ec.as_mut(), Hsv { v: *percent, ..base })
+            set_keyboard(
+                ec.as_mut(),
+                Hsv {
+                    v: *percent,
+                    ..base
+                },
+            )
         }
         RgbCmd::Backlight { state } => {
             let mut ec = open_ec(cli)?;
@@ -972,7 +1101,10 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
             }
             control::keyboard_on(ec.as_mut(), Config::load().keyboard_level)?;
             control::set_keyboard_rainbow(ec.as_mut(), state.as_bool())?;
-            println!("keyboard: {}", if state.as_bool() { "rainbow" } else { "colour" });
+            println!(
+                "keyboard: {}",
+                if state.as_bool() { "rainbow" } else { "colour" }
+            );
             Ok(())
         }
         RgbCmd::Lightbar { color } => {
@@ -1005,7 +1137,16 @@ fn set_keyboard(ec: &mut dyn EcAccess, hsv: Hsv) -> CmdResult {
     cfg.keyboard = Some(hsv);
     cfg.save()?;
     let l = hsv.to_levels();
-    println!("keyboard colour → hue {} sat {} % brightness {} % (EC levels {},{},{} of {})", hsv.h, hsv.s, hsv.v, l.0, l.1, l.2, control::KB_LEVEL_MAX);
+    println!(
+        "keyboard colour → hue {} sat {} % brightness {} % (EC levels {},{},{} of {})",
+        hsv.h,
+        hsv.s,
+        hsv.v,
+        l.0,
+        l.1,
+        l.2,
+        control::KB_LEVEL_MAX
+    );
     Ok(())
 }
 
@@ -1028,7 +1169,8 @@ fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
     // TODO(charge-limit): `battery charge-limit <percent>` and the EC limit reads
     // (BATTERY_CHARGE_LIMIT_UP/DOWN, 1977/2000) are parked; add back with
     // `BatteryCmd::ChargeLimit` in main.rs when wanted.
-    let u = uniwill(cli).map_err(|e| format!("charge profiles need the uniwill kernel driver: {e}"))?;
+    let u =
+        uniwill(cli).map_err(|e| format!("charge profiles need the uniwill kernel driver: {e}"))?;
     match cmd {
         BatteryCmd::Get => {
             let (sel, all) = u.charge_types()?;
@@ -1179,7 +1321,8 @@ fn parse_addr(s: &str) -> Result<u16, String> {
     let v = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         u16::from_str_radix(h, 16).map_err(|e| format!("bad address '{s}': {e}"))?
     } else {
-        t.parse::<u16>().map_err(|e| format!("bad address '{s}': {e}"))?
+        t.parse::<u16>()
+            .map_err(|e| format!("bad address '{s}': {e}"))?
     };
     Ok(v)
 }

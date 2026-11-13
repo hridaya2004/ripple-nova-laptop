@@ -87,9 +87,13 @@ mod tests {
 
     #[test]
     fn the_socket_delivers_commands_and_ignores_junk() {
-        let path = std::env::temp_dir().join(format!("ripple-remote-test-{}.sock", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ripple-remote-test-{}.sock", std::process::id()));
         let rx = listen_at(&path, None).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         ask_at(&path, "bogus").unwrap();
         ask_at(&path, "show").unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Cmd::Show);

@@ -9,12 +9,12 @@
 pub mod control;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(test)]
+mod mock;
 #[cfg(target_os = "linux")]
 pub mod notify;
 #[cfg(target_os = "linux")]
 pub mod touchpad;
-#[cfg(test)]
-mod mock;
 
 use std::time::Duration;
 
@@ -68,12 +68,18 @@ pub trait EcAccess: Send {
     /// Duty of fan `fan` (1 = CPU, 2 = GPU) on the EC's 0..=200 scale. These registers (0x1804 and
     /// 0x1809) are out of `ECRR`'s reach (it reads 0xFF there): only the OEM WMI call gets at them.
     fn fan_duty(&mut self, _fan: u8) -> HwResult<u8> {
-        Err(HwError::Unavailable(format!("{}: no WMI fan duty access", self.name())))
+        Err(HwError::Unavailable(format!(
+            "{}: no WMI fan duty access",
+            self.name()
+        )))
     }
 
     /// Set a fan's duty (0..=200). The EC only follows it while the manual bit (0x40) of EC 1873 is set.
     fn set_fan_duty(&mut self, _fan: u8, _duty: u8) -> HwResult<()> {
-        Err(HwError::Unavailable(format!("{}: no WMI fan duty access", self.name())))
+        Err(HwError::Unavailable(format!(
+            "{}: no WMI fan duty access",
+            self.name()
+        )))
     }
 
     /// Read-modify-write, preserving bits not in `mask`.

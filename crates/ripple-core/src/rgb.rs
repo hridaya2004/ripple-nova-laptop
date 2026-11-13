@@ -202,11 +202,7 @@ impl RgbRegState {
                 // Only care about the RGBKeyboard tree.
                 current = if key.contains(r"\RGBKeyboard") {
                     // Zone name = last path component.
-                    let zone = key
-                        .rsplit('\\')
-                        .next()
-                        .unwrap_or(key)
-                        .to_string();
+                    let zone = key.rsplit('\\').next().unwrap_or(key).to_string();
                     Some(zone)
                 } else {
                     None
@@ -275,12 +271,23 @@ impl RgbRegState {
 fn decode_reg(raw: &[u8]) -> Result<String> {
     if raw.starts_with(&[0xFF, 0xFE]) {
         Ok(String::from_utf16_lossy(
-            raw[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>().as_slice(),
+            raw[2..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
+                .collect::<Vec<_>>()
+                .as_slice(),
         ))
     } else if raw.len() >= 2 && raw[1] == 0 {
         // UTF-16LE without BOM
         Ok(String::from_utf16_lossy(
-            raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>().as_slice(),
+            raw.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
+                .collect::<Vec<_>>()
+                .as_slice(),
         ))
     } else {
         Ok(String::from_utf8_lossy(raw).into_owned())
@@ -289,7 +296,11 @@ fn decode_reg(raw: &[u8]) -> Result<String> {
 
 /// Unquote a `.reg` string value and resolve `\\` → `\`, `\"` → `"`.
 fn unescape_reg(v: &str) -> String {
-    let inner = v.trim().strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(v);
+    let inner = v
+        .trim()
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(v);
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
@@ -331,7 +342,10 @@ mod tests {
     #[test]
     fn parse_reg_sample() {
         let state = RgbRegState::parse_bytes(SAMPLE.as_bytes()).unwrap();
-        assert_eq!(state.globals.get("PowerSwitch").map(String::as_str), Some("1"));
+        assert_eq!(
+            state.globals.get("PowerSwitch").map(String::as_str),
+            Some("1")
+        );
         assert_eq!(state.globals.get("ACLight").map(String::as_str), Some("3"));
         let fz = &state.zones["FourZone"];
         let ZoneValue::Effect(eff) = &fz["16_LastEffect"] else {

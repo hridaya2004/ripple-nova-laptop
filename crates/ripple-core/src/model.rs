@@ -59,10 +59,18 @@ impl std::fmt::Display for Model {
 /// EC project id wins; DMI strings are only consulted when it doesn't resolve.
 pub fn detect(ec_id: Option<u8>, dmi: &[String]) -> Model {
     if let Some(name) = ec_id.and_then(|id| PROJECTS.iter().find(|(i, _)| *i == id)) {
-        return Model { name: Some(name.1), source: Some(Source::Ec), ec_id };
+        return Model {
+            name: Some(name.1),
+            source: Some(Source::Ec),
+            ec_id,
+        };
     }
     let name = dmi.iter().find_map(|f| model_dir_for(f));
-    Model { name, source: name.map(|_| Source::Dmi), ec_id }
+    Model {
+        name,
+        source: name.map(|_| Source::Dmi),
+        ec_id,
+    }
 }
 
 #[cfg(test)]

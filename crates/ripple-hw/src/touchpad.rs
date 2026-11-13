@@ -41,7 +41,8 @@ pub fn set(on: bool) -> HwResult<()> {
 }
 
 fn set_in(devices: &Path, driver: &Path, on: bool) -> HwResult<()> {
-    let dev = device_in(devices).ok_or_else(|| HwError::Unavailable("no Uniwill touchpad (i2c-UNIW*) found".into()))?;
+    let dev = device_in(devices)
+        .ok_or_else(|| HwError::Unavailable("no Uniwill touchpad (i2c-UNIW*) found".into()))?;
     if is_on_in(devices) == Some(on) {
         return Ok(());
     }
@@ -55,7 +56,8 @@ mod tests {
 
     #[test]
     fn off_unbinds_and_on_binds_and_a_state_that_already_holds_writes_nothing() {
-        let root = std::env::temp_dir().join(format!("ripple-touchpad-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("ripple-touchpad-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (devices, driver) = (root.join("devices"), root.join("driver"));
         std::fs::create_dir_all(devices.join("i2c-UNIW0001:00")).unwrap();
@@ -68,13 +70,19 @@ mod tests {
         set_in(&devices, &driver, false).unwrap();
         assert!(!driver.join("unbind").exists() && !driver.join("bind").exists());
         set_in(&devices, &driver, true).unwrap();
-        assert_eq!(std::fs::read_to_string(driver.join("bind")).unwrap(), "i2c-UNIW0001:00");
+        assert_eq!(
+            std::fs::read_to_string(driver.join("bind")).unwrap(),
+            "i2c-UNIW0001:00"
+        );
 
         // a `driver` link: bound = on; off unbinds
         std::fs::create_dir_all(devices.join("i2c-UNIW0001:00/driver")).unwrap();
         assert_eq!(is_on_in(&devices), Some(true));
         set_in(&devices, &driver, false).unwrap();
-        assert_eq!(std::fs::read_to_string(driver.join("unbind")).unwrap(), "i2c-UNIW0001:00");
+        assert_eq!(
+            std::fs::read_to_string(driver.join("unbind")).unwrap(),
+            "i2c-UNIW0001:00"
+        );
 
         // no touchpad at all
         assert_eq!(is_on_in(&root.join("nothing")), None);

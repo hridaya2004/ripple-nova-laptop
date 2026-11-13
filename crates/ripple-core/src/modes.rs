@@ -143,7 +143,11 @@ mod tests {
             assert_eq!(s.parse::<OperatingMode>().unwrap(), m);
         }
         assert_eq!(OperatingMode::from_u8(1), Some(OperatingMode::Gaming));
-        assert_eq!(OperatingMode::from_u8(3), None, "no Benchmark mode on this hardware");
+        assert_eq!(
+            OperatingMode::from_u8(3),
+            None,
+            "no Benchmark mode on this hardware"
+        );
         assert_eq!(OperatingMode::from_u8(9), None);
     }
 

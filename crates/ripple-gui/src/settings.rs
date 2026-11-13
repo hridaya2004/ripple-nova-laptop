@@ -30,18 +30,29 @@ fn yes() -> bool {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { light: false, font: None, popups: true, start_minimized: true }
+        Self {
+            light: false,
+            font: None,
+            popups: true,
+            start_minimized: true,
+        }
     }
 }
 
 impl Settings {
     pub fn load() -> Self {
-        std::fs::read_to_string(PATH).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+        std::fs::read_to_string(PATH)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
     }
 
     pub fn save(&self) -> std::io::Result<()> {
         std::fs::create_dir_all("/etc/ripple-nova")?;
-        std::fs::write(PATH, serde_json::to_string_pretty(self).map_err(std::io::Error::other)?)
+        std::fs::write(
+            PATH,
+            serde_json::to_string_pretty(self).map_err(std::io::Error::other)?,
+        )
     }
 }
 
@@ -51,7 +62,13 @@ fn fontconfig(args: &[&str]) -> Vec<String> {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -79,15 +96,42 @@ mod tests {
     fn defaults_are_dark_system_font_and_roundtrip() {
         let d = Settings::default();
         assert!(!d.light && d.font.is_none() && d.popups && d.start_minimized);
-        let s = Settings { light: true, font: Some("Fira Code".into()), popups: false, start_minimized: false };
-        assert_eq!(serde_json::from_str::<Settings>(&serde_json::to_string(&s).unwrap()).unwrap(), s);
+        let s = Settings {
+            light: true,
+            font: Some("Fira Code".into()),
+            popups: false,
+            start_minimized: false,
+        };
+        assert_eq!(
+            serde_json::from_str::<Settings>(&serde_json::to_string(&s).unwrap()).unwrap(),
+            s
+        );
         // old/partial files (even with the removed all_fonts key) still load
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), d);
-        assert_eq!(serde_json::from_str::<Settings>(r#"{"all_fonts":true}"#).unwrap(), d);
+        assert_eq!(
+            serde_json::from_str::<Settings>(r#"{"all_fonts":true}"#).unwrap(),
+            d
+        );
         // a file written before the option existed keeps popups on
-        assert!(serde_json::from_str::<Settings>(r#"{"light":true,"font":null}"#).unwrap().popups);
-        assert!(!serde_json::from_str::<Settings>(r#"{"popups":false}"#).unwrap().popups);
-        assert!(serde_json::from_str::<Settings>("{}").unwrap().start_minimized);
-        assert!(!serde_json::from_str::<Settings>(r#"{"start_minimized":false}"#).unwrap().start_minimized);
+        assert!(
+            serde_json::from_str::<Settings>(r#"{"light":true,"font":null}"#)
+                .unwrap()
+                .popups
+        );
+        assert!(
+            !serde_json::from_str::<Settings>(r#"{"popups":false}"#)
+                .unwrap()
+                .popups
+        );
+        assert!(
+            serde_json::from_str::<Settings>("{}")
+                .unwrap()
+                .start_minimized
+        );
+        assert!(
+            !serde_json::from_str::<Settings>(r#"{"start_minimized":false}"#)
+                .unwrap()
+                .start_minimized
+        );
     }
 }

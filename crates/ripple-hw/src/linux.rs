@@ -99,7 +99,9 @@ fn fan_duty_addr(fan: u8) -> HwResult<u16> {
     match fan {
         1 => Ok(0x1804),
         2 => Ok(0x1809),
-        n => Err(HwError::Other(format!("fan {n}: this EC has fans 1 (CPU) and 2 (GPU)"))),
+        n => Err(HwError::Other(format!(
+            "fan {n}: this EC has fans 1 (CPU) and 2 (GPU)"
+        ))),
     }
 }
 
@@ -146,9 +148,7 @@ fn parse_acpi_result(method: &str, out: &str) -> HwResult<u64> {
             || upper.contains("UNDEFINED")
             || upper.contains("BAD_PATHNAME")
         {
-            return Err(HwError::Unavailable(format!(
-                "ACPI method {method}: {out}"
-            )));
+            return Err(HwError::Unavailable(format!("ACPI method {method}: {out}")));
         }
         return Err(HwError::Other(format!("ACPI method {method}: {out}")));
     }
@@ -264,7 +264,10 @@ fn discover_method(candidates: &[String], method: &str, args: &[u64]) -> HwResul
             Err(e) => note(c, short_reason(&e)),
         }
     }
-    Err(HwError::Unavailable(format!("no usable {method} method ({})", tried.join("; "))))
+    Err(HwError::Unavailable(format!(
+        "no usable {method} method ({})",
+        tried.join("; ")
+    )))
 }
 
 /// A few words for why a probe failed (the full text of an ACPI error is not for a one-line summary).
@@ -350,7 +353,11 @@ impl AcpiCallEc {
         for p in [r"\_SB.AMW0", r"\_SB_.AMW0"] {
             push_unique(&mut candidates, p.into());
         }
-        let dev = discover_method(&candidates, "WMBC", &[0, 4, protocol::encode_read(PROBE_ADDR as u16)])?;
+        let dev = discover_method(
+            &candidates,
+            "WMBC",
+            &[0, 4, protocol::encode_read(PROBE_ADDR as u16)],
+        )?;
         let path = format!("{dev}.WMBC");
         self.wmbc = Some(path.clone());
         Ok(path)
@@ -664,12 +671,24 @@ impl SysfsEc {
         };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            let read = |p: &std::path::Path| std::fs::read_to_string(p).ok().and_then(|v| v.trim().parse::<i64>().ok());
-            if let Some(idx) = name.strip_prefix("temp").and_then(|r| r.strip_suffix("_input")).and_then(|i| i.parse::<u32>().ok()) {
+            let read = |p: &std::path::Path| {
+                std::fs::read_to_string(p)
+                    .ok()
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+            };
+            if let Some(idx) = name
+                .strip_prefix("temp")
+                .and_then(|r| r.strip_suffix("_input"))
+                .and_then(|i| i.parse::<u32>().ok())
+            {
                 if let Some(mv) = read(&e.path()) {
                     temps.push((idx, label("temp", idx), mv as i32));
                 }
-            } else if let Some(idx) = name.strip_prefix("fan").and_then(|r| r.strip_suffix("_input")).and_then(|i| i.parse::<u32>().ok()) {
+            } else if let Some(idx) = name
+                .strip_prefix("fan")
+                .and_then(|r| r.strip_suffix("_input"))
+                .and_then(|i| i.parse::<u32>().ok())
+            {
                 if let Some(rpm) = read(&e.path()) {
                     fans.push((idx, fan_label(idx), rpm as u32));
                 }
@@ -694,7 +713,8 @@ impl SysfsEc {
     /// The lightbar LED device: a uniwill multicolor LED (`uniwill:*:status` preferred).
     /// Never any other driver's LED that merely has `multi_intensity`.
     fn lightbar_dir(&self) -> HwResult<std::path::PathBuf> {
-        let rd = std::fs::read_dir("/sys/class/leds").map_err(|e| HwError::Other(format!("leds: {e}")))?;
+        let rd = std::fs::read_dir("/sys/class/leds")
+            .map_err(|e| HwError::Other(format!("leds: {e}")))?;
         let mut found: Vec<(bool, std::path::PathBuf)> = rd
             .flatten()
             .filter_map(|e| {
@@ -704,11 +724,9 @@ impl SysfsEc {
             })
             .collect();
         found.sort_by_key(|(status, _)| !*status);
-        found
-            .into_iter()
-            .next()
-            .map(|(_, p)| p)
-            .ok_or_else(|| HwError::Unavailable("no uniwill multicolor LED (lightbar) found".into()))
+        found.into_iter().next().map(|(_, p)| p).ok_or_else(|| {
+            HwError::Unavailable("no uniwill multicolor LED (lightbar) found".into())
+        })
     }
 
     /// Current lightbar state: `(r, g, b, brightness)`.
@@ -780,8 +798,7 @@ impl SysfsEc {
                 let mut sel = String::new();
                 let mut all = Vec::new();
                 for tok in raw.split_whitespace() {
-                    if let Some(inner) = tok.strip_prefix('[').and_then(|t| t.strip_suffix(']'))
-                    {
+                    if let Some(inner) = tok.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
                         sel = inner.to_string();
                         all.push(inner.to_string());
                     } else {
@@ -955,9 +972,18 @@ mod tests {
     #[test]
     fn trims_sysfs_acpi_path_padding() {
         assert_eq!(trim_acpi_name(r"\_SB_.INOU"), r"\_SB.INOU");
-        assert_eq!(trim_acpi_name(r"\_SB_.PC00.LPCB.EC0_"), r"\_SB.PC00.LPCB.EC0");
-        assert_eq!(trim_acpi_name(r"\_SB_.PC00.HDAS.SNDW"), r"\_SB.PC00.HDAS.SNDW");
+        assert_eq!(
+            trim_acpi_name(r"\_SB_.PC00.LPCB.EC0_"),
+            r"\_SB.PC00.LPCB.EC0"
+        );
+        assert_eq!(
+            trim_acpi_name(r"\_SB_.PC00.HDAS.SNDW"),
+            r"\_SB.PC00.HDAS.SNDW"
+        );
         // inner underscores must survive
-        assert_eq!(trim_acpi_name(r"\_SB_.PC00.LPCB.H_EC"), r"\_SB.PC00.LPCB.H_EC");
+        assert_eq!(
+            trim_acpi_name(r"\_SB_.PC00.LPCB.H_EC"),
+            r"\_SB.PC00.LPCB.H_EC"
+        );
     }
 }

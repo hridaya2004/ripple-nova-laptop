@@ -66,7 +66,11 @@ pub struct Snapshot {
 
 impl Default for Snapshot {
     fn default() -> Self {
-        let p = Preset { pl1: 0, pl2: 0, ctgp: 0 };
+        let p = Preset {
+            pl1: 0,
+            pl2: 0,
+            ctgp: 0,
+        };
         Self {
             model: String::new(),
             backend: String::new(),
@@ -87,7 +91,11 @@ impl Default for Snapshot {
             keyboard: None,
             rainbow: false,
             kb_level: control::KB_BACKLIGHT_MAX,
-            hsv: Hsv { h: 180, s: 100, v: 100 },
+            hsv: Hsv {
+                h: 180,
+                s: 100,
+                v: 100,
+            },
             toggles: vec![],
             button: false,
             service: false,
@@ -158,7 +166,10 @@ impl Hw {
     pub fn snapshot(&mut self) -> Snapshot {
         let mut s = Snapshot {
             model: self.model.clone(),
-            backend: self.ec.as_ref().map_or("none".into(), |e| e.name().to_string()),
+            backend: self
+                .ec
+                .as_ref()
+                .map_or("none".into(), |e| e.name().to_string()),
             ec_error: self.ec_error.clone(),
             stock: self.stock,
             custom: self.cfg.custom,
@@ -176,7 +187,10 @@ impl Hw {
         s.fan = self.cfg.fan.clone();
         if let Some(ec) = self.ec.as_deref_mut() {
             s.profile = control::current(ec, &stock, &custom).ok().flatten();
-            s.pl = ec.read(addr::PL1_SETTING).ok().zip(ec.read(addr::PL2_SETTING).ok());
+            s.pl = ec
+                .read(addr::PL1_SETTING)
+                .ok()
+                .zip(ec.read(addr::PL2_SETTING).ok());
             let fan_byte = ec.read(addr::MAFAN_CONTROL_BYTE).ok();
             s.boosted = fan_byte.is_some_and(control::is_boosted) && !self.cfg.fan.enabled;
             s.has_lightbar = control::has_lightbar(ec);
@@ -197,14 +211,27 @@ impl Hw {
         // The chosen colour/brightness while the EC still shows it; else whatever the EC shows now.
         s.hsv = control::keyboard_choice(self.cfg.keyboard, s.keyboard).unwrap_or(s.hsv);
         if let Some(u) = &self.sysfs {
-            s.ctgp = u.get_attr("ctgp_offset").ok().and_then(|v| v.trim().parse().ok());
+            s.ctgp = u
+                .get_attr("ctgp_offset")
+                .ok()
+                .and_then(|v| v.trim().parse().ok());
             if let Ok(x) = u.sensors() {
-                s.temps = x.temps.iter().map(|(l, mv)| (l.clone(), f64::from(*mv) / 1000.0)).collect();
+                s.temps = x
+                    .temps
+                    .iter()
+                    .map(|(l, mv)| (l.clone(), f64::from(*mv) / 1000.0))
+                    .collect();
                 s.fans = x
                     .fans
                     .iter()
                     .enumerate()
-                    .map(|(i, (l, rpm))| (l.clone(), *rpm, x.pwms.get(i).map(|p| u32::from(*p) * 100 / 255)))
+                    .map(|(i, (l, rpm))| {
+                        (
+                            l.clone(),
+                            *rpm,
+                            x.pwms.get(i).map(|p| u32::from(*p) * 100 / 255),
+                        )
+                    })
                     .collect();
             }
             if s.has_lightbar {
@@ -221,7 +248,11 @@ impl Hw {
         let snap = self.snapshot();
         let hottest = snap.temps.iter().map(|(_, c)| *c).fold(f64::MIN, f64::max);
         // the custom fan profile owns the fans while it is on
-        let policy = if snap.fan.enabled { None } else { snap.auto_boost };
+        let policy = if snap.fan.enabled {
+            None
+        } else {
+            snap.auto_boost
+        };
         if let Some(on) = control::auto_boost_action(policy, hottest, snap.boosted, self.ours) {
             if let Ok(ec) = self.ec() {
                 if control::set_boost(ec, on).is_ok() {
@@ -249,7 +280,13 @@ impl Hw {
         });
         self.sysfs = sysfs;
         r?;
-        Ok(format!("{}: PL1 {} W / PL2 {} W / GPU cTGP +{} W", p.name().to_lowercase(), pr.pl1, pr.pl2, pr.ctgp))
+        Ok(format!(
+            "{}: PL1 {} W / PL2 {} W / GPU cTGP +{} W",
+            p.name().to_lowercase(),
+            pr.pl1,
+            pr.pl2,
+            pr.ctgp
+        ))
     }
 
     /// One press of the hardware mode button.
@@ -294,13 +331,20 @@ impl Hw {
             return Ok("custom preset unchanged".into());
         }
         let (stock, old) = (self.stock, self.cfg.custom);
-        let was_active = self.ec().ok().and_then(|ec| control::current(ec, &stock, &old).ok().flatten()) == Some(Profile::Custom);
+        let was_active = self
+            .ec()
+            .ok()
+            .and_then(|ec| control::current(ec, &stock, &old).ok().flatten())
+            == Some(Profile::Custom);
         self.cfg.custom = p;
         self.cfg.save().map_err(|e| e.to_string())?;
         if was_active {
             return self.set_profile(Profile::Custom);
         }
-        Ok(format!("custom preset: PL1 {} W / PL2 {} W / cTGP +{} W", p.pl1, p.pl2, p.ctgp))
+        Ok(format!(
+            "custom preset: PL1 {} W / PL2 {} W / cTGP +{} W",
+            p.pl1, p.pl2, p.ctgp
+        ))
     }
 
     /// Auto (firmware), the custom fan profile (the daemon applies it) or boost.
@@ -315,7 +359,12 @@ impl Hw {
             // the daemon's engine hands the fans back within one tick; let it, or it could undo
             // (or clear) what is set next
             for _ in 0..15 {
-                if ec.read(addr::MAFAN_CONTROL_BYTE).map_err(|e| e.to_string())? & 0x40 == 0 {
+                if ec
+                    .read(addr::MAFAN_CONTROL_BYTE)
+                    .map_err(|e| e.to_string())?
+                    & 0x40
+                    == 0
+                {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -337,17 +386,28 @@ impl Hw {
     /// around it move with it.
     pub fn set_fan_point(&mut self, fan: usize, idx: usize, duty: u8) -> Result<String, String> {
         self.cfg.fan = Config::load().fan;
-        let c = if fan == 0 { &mut self.cfg.fan.cpu } else { &mut self.cfg.fan.gpu };
+        let c = if fan == 0 {
+            &mut self.cfg.fan.cpu
+        } else {
+            &mut self.cfg.fan.gpu
+        };
         control::set_curve_point(c, idx, duty);
         self.cfg.fan.validate()?;
         self.cfg.save().map_err(|e| e.to_string())?;
-        Ok(format!("{} fan: {duty} % at {} °C", if fan == 0 { "CPU" } else { "GPU" }, control::FAN_ANCHORS[idx]))
+        Ok(format!(
+            "{} fan: {duty} % at {} °C",
+            if fan == 0 { "CPU" } else { "GPU" },
+            control::FAN_ANCHORS[idx]
+        ))
     }
 
     /// The default preset (on/off is kept).
     pub fn reset_fan_curves(&mut self) -> Result<String, String> {
         let enabled = Config::load().fan.enabled;
-        self.cfg.fan = FanCurves { enabled, ..FanCurves::default() };
+        self.cfg.fan = FanCurves {
+            enabled,
+            ..FanCurves::default()
+        };
         self.cfg.save().map_err(|e| e.to_string())?;
         Ok("fan curves: default preset".into())
     }
@@ -366,7 +426,11 @@ impl Hw {
     pub fn hsv(&mut self) -> Hsv {
         let saved = self.cfg.keyboard;
         let levels = self.ec().ok().and_then(|ec| control::keyboard_rgb(ec).ok());
-        control::keyboard_choice(saved, levels).unwrap_or(Hsv { h: 180, s: 100, v: 100 })
+        control::keyboard_choice(saved, levels).unwrap_or(Hsv {
+            h: 180,
+            s: 100,
+            v: 100,
+        })
     }
 
     pub fn set_rainbow(&mut self, on: bool) -> Result<String, String> {
@@ -374,7 +438,12 @@ impl Hw {
         let ec = self.ec()?;
         control::keyboard_on(ec, was).map_err(|e| e.to_string())?;
         control::set_keyboard_rainbow(ec, on).map_err(|e| e.to_string())?;
-        Ok(if on { "keyboard: rainbow" } else { "keyboard: colour" }.into())
+        Ok(if on {
+            "keyboard: rainbow"
+        } else {
+            "keyboard: colour"
+        }
+        .into())
     }
 
     /// Backlight off; the level it had is kept to come back to.
@@ -397,11 +466,17 @@ impl Hw {
         self.cfg.keyboard = Some(hsv);
         self.cfg.save().map_err(|e| e.to_string())?;
         let l = hsv.to_levels();
-        Ok(format!("keyboard: hue {} sat {} % brightness {} % (levels {},{},{})", hsv.h, hsv.s, hsv.v, l.0, l.1, l.2))
+        Ok(format!(
+            "keyboard: hue {} sat {} % brightness {} % (levels {},{},{})",
+            hsv.h, hsv.s, hsv.v, l.0, l.1, l.2
+        ))
     }
 
     pub fn set_lightbar(&self, rgb: Option<(u8, u8, u8)>) -> Result<String, String> {
-        let u = self.sysfs.as_ref().ok_or("uniwill kernel driver not loaded")?;
+        let u = self
+            .sysfs
+            .as_ref()
+            .ok_or("uniwill kernel driver not loaded")?;
         u.set_lightbar(rgb).map_err(|e| e.to_string())?;
         Ok("lightbar updated".into())
     }
@@ -412,8 +487,12 @@ impl Hw {
             control::set_touchpad(on).map_err(|e| e.to_string())?;
             return Ok(format!("touchpad → {}", if on { "on" } else { "off" }));
         }
-        let u = self.sysfs.as_ref().ok_or("uniwill kernel driver not loaded")?;
-        u.set_attr(name, if on { "on" } else { "off" }).map_err(|e| e.to_string())?;
+        let u = self
+            .sysfs
+            .as_ref()
+            .ok_or("uniwill kernel driver not loaded")?;
+        u.set_attr(name, if on { "on" } else { "off" })
+            .map_err(|e| e.to_string())?;
         Ok(format!("{name} → {}", if on { "on" } else { "off" }))
     }
 }

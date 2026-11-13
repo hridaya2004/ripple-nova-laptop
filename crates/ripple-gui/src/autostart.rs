@@ -117,24 +117,44 @@ mod tests {
 
     #[test]
     fn enable_installs_a_copy_launcher_and_entry_and_disable_removes_them() {
-        let root = std::env::temp_dir().join(format!("ripple-autostart-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("ripple-autostart-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let exe = root.join("built-binary");
         std::fs::write(&exe, b"binary").unwrap();
-        let l = Layout { dir: root.join("lib"), entry: root.join("autostart/ripple-nova.desktop") };
+        let l = Layout {
+            dir: root.join("lib"),
+            entry: root.join("autostart/ripple-nova.desktop"),
+        };
 
         assert!(!l.is_enabled());
         l.enable(&exe, true).unwrap();
         assert!(l.is_enabled());
         assert_eq!(std::fs::read(l.bin()).unwrap(), b"binary");
-        assert_eq!(std::fs::metadata(l.bin()).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::metadata(l.bin()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
         let script = std::fs::read_to_string(l.launcher()).unwrap();
-        assert!(script.contains("exec pkexec env"), "polkit stays the fallback");
-        assert!(script.contains(&format!("sudo -n -l {} --minimized", l.bin().display())), "sudo is tried first");
+        assert!(
+            script.contains("exec pkexec env"),
+            "polkit stays the fallback"
+        );
+        assert!(
+            script.contains(&format!("sudo -n -l {} --minimized", l.bin().display())),
+            "sudo is tried first"
+        );
         assert!(script.contains("flock -n"), "no second instance");
-        let parsed = std::process::Command::new("sh").arg("-n").arg(l.launcher()).status().unwrap();
-        assert!(parsed.success(), "the generated launcher must be valid shell:\n{script}");
+        let parsed = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(l.launcher())
+            .status()
+            .unwrap();
+        assert!(
+            parsed.success(),
+            "the generated launcher must be valid shell:\n{script}"
+        );
         assert!(script.contains(&format!("{} --minimized", l.bin().display())));
         let entry = std::fs::read_to_string(&l.entry).unwrap();
         assert!(entry.contains(&format!("Exec={}", l.launcher().display())));
@@ -148,9 +168,19 @@ mod tests {
         l.enable(&exe, false).unwrap();
         let plain = std::fs::read_to_string(l.launcher()).unwrap();
         let bin = l.bin().display().to_string();
-        assert!(plain.contains(&format!("sudo -n -l {bin} >/dev/null 2>&1; then exec sudo -n {bin}; fi")), "{plain}");
+        assert!(
+            plain.contains(&format!(
+                "sudo -n -l {bin} >/dev/null 2>&1; then exec sudo -n {bin}; fi"
+            )),
+            "{plain}"
+        );
         assert!(!plain.contains("--minimized"));
-        assert!(std::process::Command::new("sh").arg("-n").arg(l.launcher()).status().unwrap().success());
+        assert!(std::process::Command::new("sh")
+            .arg("-n")
+            .arg(l.launcher())
+            .status()
+            .unwrap()
+            .success());
 
         l.disable().unwrap();
         assert!(!l.is_enabled() && !l.bin().exists() && !l.launcher().exists());

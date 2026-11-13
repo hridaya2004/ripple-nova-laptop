@@ -15,7 +15,9 @@ const GUI_SETTINGS: &str = "/etc/ripple-nova/gui.json";
 /// Send one popup to the session whose runtime directory is `dir`, best effort and off the calling
 /// thread. Nothing is sent for a directory owned by root or without a session bus.
 pub fn send_to(dir: &Path, title: &str, body: &str) {
-    let Ok(md) = std::fs::metadata(dir) else { return };
+    let Ok(md) = std::fs::metadata(dir) else {
+        return;
+    };
     let (uid, gid) = (md.uid(), md.gid());
     if uid == 0 || !dir.join("bus").exists() {
         return;
@@ -24,22 +26,45 @@ pub fn send_to(dir: &Path, title: &str, body: &str) {
     std::thread::spawn(move || {
         // `status()` waits for the child, so it does not linger as a zombie
         let _ = Command::new("setpriv")
-            .args(["--reuid", &uid.to_string(), "--regid", &gid.to_string(), "--clear-groups"])
-            .args(["notify-send", "--app-name=Ripple Control Center", "--icon=ripple-nova", "--transient", "--"])
+            .args([
+                "--reuid",
+                &uid.to_string(),
+                "--regid",
+                &gid.to_string(),
+                "--clear-groups",
+            ])
+            .args([
+                "notify-send",
+                "--app-name=Ripple Control Center",
+                "--icon=ripple-nova",
+                "--transient",
+                "--",
+            ])
             .args([&title, &body])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}/bus", dir.display()))
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/bus", dir.display()),
+            )
             .status();
     });
 }
 
 /// Is a process with this name (`comm`, at most 15 characters) running?
 fn process_running(comm: &str) -> bool {
-    std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|e| {
-        e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())
-            && std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim_end() == comm)
-    })
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+                && std::fs::read_to_string(e.path().join("comm"))
+                    .is_ok_and(|c| c.trim_end() == comm)
+        })
 }
 
 /// Make sure the tray icon helper runs in the session whose runtime directory is `dir`: the window needs it
@@ -47,7 +72,9 @@ fn process_running(comm: &str) -> bool {
 /// user's session bus, which a root process cannot join, so it is started as that user, in its own transient
 /// user service (it outlives the window and the terminal). Best effort; nothing happens when it already runs.
 pub fn ensure_tray(dir: &Path, tray: &Path) {
-    let Ok(md) = std::fs::metadata(dir) else { return };
+    let Ok(md) = std::fs::metadata(dir) else {
+        return;
+    };
     let (uid, gid) = (md.uid(), md.gid());
     if uid == 0 || !tray.exists() || process_running("rcc-tray") {
         return;
@@ -55,13 +82,28 @@ pub fn ensure_tray(dir: &Path, tray: &Path) {
     let (dir, tray) = (dir.to_path_buf(), tray.to_path_buf());
     std::thread::spawn(move || {
         let _ = Command::new("setpriv")
-            .args(["--reuid", &uid.to_string(), "--regid", &gid.to_string(), "--clear-groups"])
-            .args(["systemd-run", "--user", "--quiet", "--collect", "--unit=ripple-nova-tray"])
+            .args([
+                "--reuid",
+                &uid.to_string(),
+                "--regid",
+                &gid.to_string(),
+                "--clear-groups",
+            ])
+            .args([
+                "systemd-run",
+                "--user",
+                "--quiet",
+                "--collect",
+                "--unit=ripple-nova-tray",
+            ])
             .arg(&tray)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("XDG_RUNTIME_DIR", &dir)
-            .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}/bus", dir.display()))
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/bus", dir.display()),
+            )
             .status();
     });
 }
@@ -75,9 +117,16 @@ pub fn send_to_logged_in(title: &str, body: &str) {
 
 /// `<base>/<uid>` directories of real users that have a session bus.
 fn session_dirs(base: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(base) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(base) else {
+        return Vec::new();
+    };
     rd.flatten()
-        .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok_and(|uid| uid != 0))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .parse::<u32>()
+                .is_ok_and(|uid| uid != 0)
+        })
         .map(|e| e.path())
         .filter(|p| p.join("bus").exists())
         .collect()
@@ -97,7 +146,14 @@ fn popups_from(json: &str) -> bool {
 
 /// Toggles whose effect is not established on every machine (or was not seen here): the window marks them.
 pub fn is_experimental(name: &str) -> bool {
-    matches!(name, "touchpad" | "touchpad_toggle_enable" | "breathing_in_suspend" | "ac_auto_boot" | "usb_powershare_high")
+    matches!(
+        name,
+        "touchpad"
+            | "touchpad_toggle_enable"
+            | "breathing_in_suspend"
+            | "ac_auto_boot"
+            | "usb_powershare_high"
+    )
 }
 
 /// How a platform toggle is named in the window and in popups.
@@ -147,9 +203,15 @@ impl Notifier {
 
         if let Some(now) = s.profile {
             // switching *to* Custom is the user's own preset at work: no popup (leaving it for a stock one is)
-            if !first && now != Profile::Custom && self.profile.is_some_and(|before| before != now) {
-                let limits = s.pl.map(|(a, b)| format!(": PL1 {a} W / PL2 {b} W")).unwrap_or_default();
-                out.push(("Performance profile".into(), format!("{}{limits}", now.name())));
+            if !first && now != Profile::Custom && self.profile.is_some_and(|before| before != now)
+            {
+                let limits =
+                    s.pl.map(|(a, b)| format!(": PL1 {a} W / PL2 {b} W"))
+                        .unwrap_or_default();
+                out.push((
+                    "Performance profile".into(),
+                    format!("{}{limits}", now.name()),
+                ));
             }
             self.profile = Some(now);
         }
@@ -157,7 +219,11 @@ impl Notifier {
             out.push(("Fan boost".into(), onoff(s.boosted)));
         }
         for (name, on) in &s.toggles {
-            let before = self.toggles.iter().find(|(n, _)| n == name).map(|(_, v)| *v);
+            let before = self
+                .toggles
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| *v);
             if !first && before.is_some_and(|b| b != *on) {
                 out.push((toggle_label(name).to_string(), onoff(*on)));
             }
@@ -176,14 +242,23 @@ mod tests {
     fn toggle_labels_use_the_real_sysfs_names() {
         // the keys are the kernel attribute names (see PLATFORM_ATTRS); a typo here leaves the raw name on screen
         for name in crate::linux::PLATFORM_ATTRS {
-            if matches!(*name, "fn_lock" | "super_key_enable" | "ac_auto_boot" | "usb_powershare_high") {
+            if matches!(
+                *name,
+                "fn_lock" | "super_key_enable" | "ac_auto_boot" | "usb_powershare_high"
+            ) {
                 assert_ne!(toggle_label(name), *name, "{name} has no label");
             }
         }
         assert_eq!(toggle_label("ac_auto_boot"), "AC Auto-Boot");
         assert_eq!(toggle_label("touchpad"), "Touchpad power"); // the touchpad switch is not a sysfs attribute
-        // every toggle the user called experimental is marked, the plain ones are not
-        for name in ["touchpad", "touchpad_toggle_enable", "breathing_in_suspend", "ac_auto_boot", "usb_powershare_high"] {
+                                                                // every toggle the user called experimental is marked, the plain ones are not
+        for name in [
+            "touchpad",
+            "touchpad_toggle_enable",
+            "breathing_in_suspend",
+            "ac_auto_boot",
+            "usb_powershare_high",
+        ] {
             assert!(is_experimental(name), "{name}");
         }
         assert!(!is_experimental("fn_lock") && !is_experimental("super_key_enable"));
@@ -222,7 +297,12 @@ mod tests {
     }
 
     fn seen(profile: Option<Profile>, boosted: bool, toggles: &[(&'static str, bool)]) -> Observed {
-        Observed { profile, pl: Some((55, 55)), boosted, toggles: toggles.to_vec() }
+        Observed {
+            profile,
+            pl: Some((55, 55)),
+            boosted,
+            toggles: toggles.to_vec(),
+        }
     }
 
     #[test]
@@ -235,19 +315,35 @@ mod tests {
         assert!(n.observe(&seen(a, false, &[("fn_lock", false)])).is_empty());
         assert!(n.observe(&seen(a, false, &[("fn_lock", false)])).is_empty());
         // a profile change, with its limits
-        assert_eq!(n.observe(&seen(b, false, &[("fn_lock", false)])), [("Performance profile".to_string(), "Enthusiast: PL1 55 W / PL2 55 W".to_string())]);
+        assert_eq!(
+            n.observe(&seen(b, false, &[("fn_lock", false)])),
+            [(
+                "Performance profile".to_string(),
+                "Enthusiast: PL1 55 W / PL2 55 W".to_string()
+            )]
+        );
         // a failed read in between hides nothing: Gaming -> (unknown) -> Office is still Gaming -> Office
-        assert!(n.observe(&seen(None, false, &[("fn_lock", false)])).is_empty());
+        assert!(n
+            .observe(&seen(None, false, &[("fn_lock", false)]))
+            .is_empty());
         assert_eq!(n.observe(&seen(a, false, &[("fn_lock", false)])).len(), 1);
         // boost on and off, a toggle on
-        assert_eq!(n.observe(&seen(a, true, &[("fn_lock", false)])), [("Fan boost".to_string(), "On".to_string())]);
+        assert_eq!(
+            n.observe(&seen(a, true, &[("fn_lock", false)])),
+            [("Fan boost".to_string(), "On".to_string())]
+        );
         assert_eq!(
             n.observe(&seen(a, false, &[("fn_lock", true)])),
-            [("Fan boost".to_string(), "Off".to_string()), ("Fn lock".to_string(), "On".to_string())]
+            [
+                ("Fan boost".to_string(), "Off".to_string()),
+                ("Fn lock".to_string(), "On".to_string())
+            ]
         );
         // nothing "custom" pops up: switching to the Custom performance profile does not, leaving it for a stock one does
         let custom = Some(Profile::Custom);
-        assert!(n.observe(&seen(custom, false, &[("fn_lock", true)])).is_empty());
+        assert!(n
+            .observe(&seen(custom, false, &[("fn_lock", true)]))
+            .is_empty());
         assert_eq!(n.observe(&seen(b, false, &[("fn_lock", true)])).len(), 1);
     }
 
@@ -255,6 +351,12 @@ mod tests {
     fn a_profile_unknown_at_the_start_is_not_a_change_when_it_resolves() {
         let mut n = Notifier::default();
         assert!(n.observe(&seen(None, false, &[])).is_empty());
-        assert!(n.observe(&seen(Some(Profile::Stock(ripple_core::modes::OperatingMode::Turbo)), false, &[])).is_empty());
+        assert!(n
+            .observe(&seen(
+                Some(Profile::Stock(ripple_core::modes::OperatingMode::Turbo)),
+                false,
+                &[]
+            ))
+            .is_empty());
     }
 }

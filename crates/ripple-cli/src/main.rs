@@ -361,10 +361,7 @@ pub enum SystemCmd {
     ///
     /// Boolean attrs take on/off (or 1/0); `usb-c-power-priority` takes
     /// `charging|performance`; `ctgp-offset` takes a number.
-    Set {
-        name: String,
-        value: String,
-    },
+    Set { name: String, value: String },
 }
 
 fn main() {

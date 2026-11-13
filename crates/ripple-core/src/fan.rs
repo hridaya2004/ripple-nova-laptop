@@ -129,9 +129,8 @@ pub fn list_profiles(dir: impl AsRef<Path>) -> Result<Vec<String>> {
 /// `"PH4ARXX"` → `"PH4ARxx"` (matches `UserFanTables/` casing).
 pub fn model_dir_for(product_name: &str) -> Option<&'static str> {
     const MODELS: &[&str] = &[
-        "PH4AQxx", "PH4ARxx", "PH4AUxf", "PH4AUxx", "PH4AXxx", "PH4TQx1",
-        "PH4TRX1", "PH4TUX1", "PH6AQxx", "PH6ARxx", "PH6TRX1", "PH6AGxx",
-        "PH4PQxx",
+        "PH4AQxx", "PH4ARxx", "PH4AUxf", "PH4AUxx", "PH4AXxx", "PH4TQx1", "PH4TRX1", "PH4TUX1",
+        "PH6AQxx", "PH6ARxx", "PH6TRX1", "PH6AGxx", "PH4PQxx",
     ];
     let upper = product_name.to_ascii_uppercase();
     MODELS

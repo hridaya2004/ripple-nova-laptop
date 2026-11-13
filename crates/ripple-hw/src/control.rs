@@ -37,13 +37,19 @@ pub struct Preset {
 impl Preset {
     pub fn validate(&self) -> Result<(), String> {
         if !(5..=PL_CEILING_W).contains(&self.pl1) || !(5..=PL_CEILING_W).contains(&self.pl2) {
-            return Err(format!("PL1/PL2 must be 5..={PL_CEILING_W} W (got {}/{})", self.pl1, self.pl2));
+            return Err(format!(
+                "PL1/PL2 must be 5..={PL_CEILING_W} W (got {}/{})",
+                self.pl1, self.pl2
+            ));
         }
         if self.pl1 > self.pl2 {
             return Err(format!("PL1 {} W is above PL2 {} W", self.pl1, self.pl2));
         }
         if self.ctgp > CTGP_CEILING_W {
-            return Err(format!("cTGP offset must be 0..={CTGP_CEILING_W} W (got {})", self.ctgp));
+            return Err(format!(
+                "cTGP offset must be 0..={CTGP_CEILING_W} W (got {})",
+                self.ctgp
+            ));
         }
         Ok(())
     }
@@ -104,20 +110,48 @@ impl Profile {
     }
 }
 
-pub const STOCK_MODES: [OperatingMode; 3] = [OperatingMode::Office, OperatingMode::Gaming, OperatingMode::Turbo];
+pub const STOCK_MODES: [OperatingMode; 3] = [
+    OperatingMode::Office,
+    OperatingMode::Gaming,
+    OperatingMode::Turbo,
+];
 
 /// The stock presets, in `STOCK_MODES` order. Not editable and not saved: Office/Gaming are the
 /// EC's own default registers (1844/1845, 1840/1841); Turbo is the stock app's Smart APC table
 /// for this machine (PL 80/80, cTGP +20 W), read from its Windows registry.
 pub fn stock(ec: Option<&mut (dyn EcAccess + '_)>) -> [Preset; 3] {
-    let mut office = Preset { pl1: 35, pl2: 35, ctgp: 0 };
-    let mut gaming = Preset { pl1: 55, pl2: 55, ctgp: 0 };
+    let mut office = Preset {
+        pl1: 35,
+        pl2: 35,
+        ctgp: 0,
+    };
+    let mut gaming = Preset {
+        pl1: 55,
+        pl2: 55,
+        ctgp: 0,
+    };
     if let Some(ec) = ec {
         let mut rd = |a: u16, d: u8| ec.read(a).ok().filter(|v| *v >= 5).unwrap_or(d);
-        office = Preset { pl1: rd(addr::OFFICE_PL1_DEFAULT, 35), pl2: rd(addr::OFFICE_PL2_DEFAULT, 35), ctgp: 0 };
-        gaming = Preset { pl1: rd(addr::GAMING_PL1_DEFAULT, 55), pl2: rd(addr::GAMING_PL2_DEFAULT, 55), ctgp: 0 };
+        office = Preset {
+            pl1: rd(addr::OFFICE_PL1_DEFAULT, 35),
+            pl2: rd(addr::OFFICE_PL2_DEFAULT, 35),
+            ctgp: 0,
+        };
+        gaming = Preset {
+            pl1: rd(addr::GAMING_PL1_DEFAULT, 55),
+            pl2: rd(addr::GAMING_PL2_DEFAULT, 55),
+            ctgp: 0,
+        };
     }
-    [office, gaming, Preset { pl1: 80, pl2: 80, ctgp: 20 }]
+    [
+        office,
+        gaming,
+        Preset {
+            pl1: 80,
+            pl2: 80,
+            ctgp: 20,
+        },
+    ]
 }
 
 /// Keyboard colour as hue/saturation/brightness. The EC only stores per-channel levels, so
@@ -156,7 +190,11 @@ impl Hsv {
 
     pub fn from_levels((r, g, b): (u8, u8, u8)) -> Self {
         let max_l = f32::from(KB_LEVEL_MAX);
-        let (r, g, b) = (f32::from(r) / max_l, f32::from(g) / max_l, f32::from(b) / max_l);
+        let (r, g, b) = (
+            f32::from(r) / max_l,
+            f32::from(g) / max_l,
+            f32::from(b) / max_l,
+        );
         let max = r.max(g).max(b);
         let d = max - r.min(g).min(b);
         let h = if d == 0.0 {
@@ -170,7 +208,11 @@ impl Hsv {
         };
         Self {
             h: (if h < 0.0 { h + 360.0 } else { h }).round() as u16 % 360,
-            s: if max == 0.0 { 0 } else { (d / max * 100.0).round() as u8 },
+            s: if max == 0.0 {
+                0
+            } else {
+                (d / max * 100.0).round() as u8
+            },
             v: (max * 100.0).round() as u8,
         }
     }
@@ -179,7 +221,11 @@ impl Hsv {
 /// The custom performance profile preset as shipped (what "reset" goes back to).
 pub fn default_custom() -> Preset {
     // between Office and Gaming, so the first Custom is a gentle step, not a copy of a stock one
-    Preset { pl1: 45, pl2: 45, ctgp: 0 }
+    Preset {
+        pl1: 45,
+        pl2: 45,
+        ctgp: 0,
+    }
 }
 
 /// Saved settings (`/etc/ripple-nova/config.json`). Stock presets are deliberately absent.
@@ -217,7 +263,14 @@ impl Config {
         let mut cfg = std::fs::read_to_string(Self::PATH)
             .ok()
             .and_then(|t| serde_json::from_str::<Self>(&t).ok())
-            .unwrap_or(Self { custom: default_custom(), keyboard: None, auto_boost_above: None, fan: FanCurves::default(), keyboard_level: None, touchpad_on: true });
+            .unwrap_or(Self {
+                custom: default_custom(),
+                keyboard: None,
+                auto_boost_above: None,
+                fan: FanCurves::default(),
+                keyboard_level: None,
+                touchpad_on: true,
+            });
         if cfg.custom.validate().is_err() {
             cfg.custom = default_custom();
         }
@@ -228,7 +281,9 @@ impl Config {
     }
 
     pub fn save(&self) -> HwResult<()> {
-        let dir = std::path::Path::new(Self::PATH).parent().expect("PATH has a parent");
+        let dir = std::path::Path::new(Self::PATH)
+            .parent()
+            .expect("PATH has a parent");
         std::fs::create_dir_all(dir)?;
         let text = serde_json::to_string_pretty(self).map_err(|e| HwError::Other(e.to_string()))?;
         std::fs::write(Self::PATH, text)?;
@@ -252,7 +307,10 @@ pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwRes
         u.set_attr("ctgp_offset", &p.ctgp.to_string())?;
         let back = u.get_attr("ctgp_offset")?;
         if back.trim() != p.ctgp.to_string() {
-            return Err(HwError::Other(format!("ctgp_offset: wrote {}, read {back}", p.ctgp)));
+            return Err(HwError::Other(format!(
+                "ctgp_offset: wrote {}, read {back}",
+                p.ctgp
+            )));
         }
     }
     Ok(())
@@ -262,7 +320,11 @@ pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwRes
 /// over Custom when both match. Both registers read 0 until something applies limits (fresh boot,
 /// or the EC still in the state Windows left it): then the EC runs its own profile and its mode
 /// byte (the button's lights) says which, so the profile is read from there.
-pub fn current(ec: &mut dyn EcAccess, stock: &[Preset; 3], custom: &Preset) -> HwResult<Option<Profile>> {
+pub fn current(
+    ec: &mut dyn EcAccess,
+    stock: &[Preset; 3],
+    custom: &Preset,
+) -> HwResult<Option<Profile>> {
     let now = (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?);
     let hit = |p: &Preset| (p.pl1, p.pl2) == now;
     let by_limits = STOCK_MODES
@@ -287,8 +349,15 @@ pub fn preset_for(stock: &[Preset; 3], custom: &Preset, p: Profile) -> Preset {
 /// Start-up sync (daemon and GUI): find the profile the EC is running, write its limits when none
 /// are set yet (so the EC enforces what the UI shows, as the stock Windows service does on boot),
 /// and put the button's lights on it.
-pub fn adopt(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, stock: &[Preset; 3], custom: &Preset) -> HwResult<Option<Profile>> {
-    let Some(p) = current(ec, stock, custom)? else { return Ok(None) };
+pub fn adopt(
+    ec: &mut dyn EcAccess,
+    sysfs: Option<&SysfsEc>,
+    stock: &[Preset; 3],
+    custom: &Preset,
+) -> HwResult<Option<Profile>> {
+    let Some(p) = current(ec, stock, custom)? else {
+        return Ok(None);
+    };
     if (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?) == (0, 0) {
         apply(ec, sysfs, preset_for(stock, custom, p))?;
     }
@@ -324,7 +393,11 @@ pub fn has_keyboard_rgb(ec: &mut dyn EcAccess) -> bool {
 
 /// Current keyboard colour, each channel `0..=KB_LEVEL_MAX`.
 pub fn keyboard_rgb(ec: &mut dyn EcAccess) -> HwResult<(u8, u8, u8)> {
-    Ok((ec.read(addr::RGBKB_LEVEL_R)?, ec.read(addr::RGBKB_LEVEL_G)?, ec.read(addr::RGBKB_LEVEL_B)?))
+    Ok((
+        ec.read(addr::RGBKB_LEVEL_R)?,
+        ec.read(addr::RGBKB_LEVEL_G)?,
+        ec.read(addr::RGBKB_LEVEL_B)?,
+    ))
 }
 
 /// Set the keyboard colour (each channel `0..=KB_LEVEL_MAX`). Writing the registers alone
@@ -332,13 +405,19 @@ pub fn keyboard_rgb(ec: &mut dyn EcAccess) -> HwResult<(u8, u8, u8)> {
 /// on this machine: without it the colour stays put, with it the keyboard changes at once).
 pub fn set_keyboard_rgb(ec: &mut dyn EcAccess, (r, g, b): (u8, u8, u8)) -> HwResult<()> {
     if r.max(g).max(b) > KB_LEVEL_MAX {
-        return Err(HwError::Other(format!("keyboard colour levels must be 0..={KB_LEVEL_MAX} (got {r},{g},{b})")));
+        return Err(HwError::Other(format!(
+            "keyboard colour levels must be 0..={KB_LEVEL_MAX} (got {r},{g},{b})"
+        )));
     }
     ec.write_verified(addr::RGBKB_LEVEL_R, r)?;
     ec.write_verified(addr::RGBKB_LEVEL_G, g)?;
     ec.write_verified(addr::RGBKB_LEVEL_B, b)?;
     // picking a colour ends the rainbow: the EC would otherwise apply it with bit 7 still set
-    ec.update(addr::TRIGGER_BYTE, KB_APPLY_BIT | KB_RAINBOW_BIT, KB_APPLY_BIT)?;
+    ec.update(
+        addr::TRIGGER_BYTE,
+        KB_APPLY_BIT | KB_RAINBOW_BIT,
+        KB_APPLY_BIT,
+    )?;
     Ok(())
 }
 
@@ -359,7 +438,10 @@ pub fn keyboard_backlight(ec: &mut dyn EcAccess) -> HwResult<u8> {
 pub fn set_keyboard_backlight(ec: &mut dyn EcAccess, level: u8) -> HwResult<()> {
     let cur = ec.read(KB_STATUS)?;
     let keep = cur & !(KB_STATUS_LEVEL | KB_STATUS_POWER_OFF);
-    ec.write(KB_STATUS, keep | (level.min(KB_BACKLIGHT_MAX) << 5) | KB_STATUS_APPLY)
+    ec.write(
+        KB_STATUS,
+        keep | (level.min(KB_BACKLIGHT_MAX) << 5) | KB_STATUS_APPLY,
+    )
 }
 
 /// Backlight off. Black is not a colour here (the colour registers can't do it), so this is the
@@ -386,7 +468,11 @@ pub fn keyboard_rainbow(ec: &mut dyn EcAccess) -> HwResult<bool> {
 /// Rainbow on, or back to the colour registers.
 pub fn set_keyboard_rainbow(ec: &mut dyn EcAccess, on: bool) -> HwResult<()> {
     let bit = if on { KB_RAINBOW_BIT } else { 0 };
-    ec.update(addr::TRIGGER_BYTE, KB_APPLY_BIT | KB_RAINBOW_BIT, KB_APPLY_BIT | bit)?;
+    ec.update(
+        addr::TRIGGER_BYTE,
+        KB_APPLY_BIT | KB_RAINBOW_BIT,
+        KB_APPLY_BIT | bit,
+    )?;
     Ok(())
 }
 
@@ -466,7 +552,9 @@ fn boost_byte(cur: u8, on: bool, stash: &mut Option<u8>) -> u8 {
 
 /// Switch fan boost on/off, returns `(old, new)` control byte (equal = nothing written).
 pub fn set_boost(ec: &mut dyn EcAccess, on: bool) -> HwResult<(u8, u8)> {
-    let mut stash = std::fs::read_to_string(STASH_PATH).ok().and_then(|s| s.trim().parse().ok());
+    let mut stash = std::fs::read_to_string(STASH_PATH)
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
     let cur = ec.read(addr::MAFAN_CONTROL_BYTE)?;
     let new = boost_byte(cur, on, &mut stash);
     if new != cur {
@@ -486,7 +574,12 @@ pub fn is_boosted(byte: u8) -> bool {
 }
 
 /// Software fan policy with 8 °C hysteresis. Only turns off a boost it turned on.
-pub fn auto_boost_action(threshold: Option<u8>, temp_c: f64, boosted: bool, ours: bool) -> Option<bool> {
+pub fn auto_boost_action(
+    threshold: Option<u8>,
+    temp_c: f64,
+    boosted: bool,
+    ours: bool,
+) -> Option<bool> {
     let t = f64::from(threshold?);
     if !boosted && temp_c >= t {
         Some(true)
@@ -530,7 +623,11 @@ pub struct FanCurves {
 
 impl Default for FanCurves {
     fn default() -> Self {
-        Self { enabled: false, cpu: [20, 30, 45, 70, 100], gpu: [0, 25, 40, 65, 100] }
+        Self {
+            enabled: false,
+            cpu: [20, 30, 45, 70, 100],
+            gpu: [0, 25, 40, 65, 100],
+        }
     }
 }
 
@@ -541,10 +638,15 @@ impl FanCurves {
                 return Err(format!("{name}: duty is 0..=100 %"));
             }
             if c.windows(2).any(|w| w[0] > w[1]) {
-                return Err(format!("{name}: duty must not fall as the temperature rises"));
+                return Err(format!(
+                    "{name}: duty must not fall as the temperature rises"
+                ));
             }
             if c[4] < FAN_MIN_AT_TOP {
-                return Err(format!("{name}: at least {FAN_MIN_AT_TOP} % at {} °C", FAN_ANCHORS[4]));
+                return Err(format!(
+                    "{name}: at least {FAN_MIN_AT_TOP} % at {} °C",
+                    FAN_ANCHORS[4]
+                ));
             }
         }
         Ok(())
@@ -569,7 +671,9 @@ pub fn curve_duty(curve: &[u8; 5], temp_c: f64) -> u8 {
 /// Set one point of a curve; the curve never falls, so the points around it move along.
 pub fn set_curve_point(curve: &mut [u8; 5], idx: usize, duty: u8) {
     curve[idx] = duty;
-    curve[idx + 1..].iter_mut().for_each(|d| *d = (*d).max(duty));
+    curve[idx + 1..]
+        .iter_mut()
+        .for_each(|d| *d = (*d).max(duty));
     curve[..idx].iter_mut().for_each(|d| *d = (*d).min(duty));
 }
 
@@ -586,7 +690,9 @@ pub fn fan_smooth(prev: u8, target: u8) -> u8 {
 /// missing follows the other one; no sensor at all, or one at `FAN_PANIC_C`, means both flat out.
 pub fn fan_targets(cfg: &FanCurves, cpu: Option<f64>, gpu: Option<f64>) -> [u8; 2] {
     match (cpu.or(gpu), gpu.or(cpu)) {
-        (Some(c), Some(g)) if c < FAN_PANIC_C && g < FAN_PANIC_C => [curve_duty(&cfg.cpu, c), curve_duty(&cfg.gpu, g)],
+        (Some(c), Some(g)) if c < FAN_PANIC_C && g < FAN_PANIC_C => {
+            [curve_duty(&cfg.cpu, c), curve_duty(&cfg.gpu, g)]
+        }
         _ => [100, 100],
     }
 }
@@ -617,12 +723,22 @@ pub struct FanEngine {
 
 impl Default for FanEngine {
     fn default() -> Self {
-        Self { duty: [100; 2], ours: false, settle: std::time::Duration::from_millis(500) }
+        Self {
+            duty: [100; 2],
+            ours: false,
+            settle: std::time::Duration::from_millis(500),
+        }
     }
 }
 
 impl FanEngine {
-    pub fn tick(&mut self, ec: &mut dyn EcAccess, cfg: &FanCurves, cpu: Option<f64>, gpu: Option<f64>) -> HwResult<()> {
+    pub fn tick(
+        &mut self,
+        ec: &mut dyn EcAccess,
+        cfg: &FanCurves,
+        cpu: Option<f64>,
+        gpu: Option<f64>,
+    ) -> HwResult<()> {
         if !cfg.enabled {
             return self.stop(ec);
         }
@@ -665,7 +781,11 @@ impl FanEngine {
 /// CPU and GPU temperature (°C) out of the hwmon readings, by label, else by position.
 fn cpu_gpu_temps(s: &crate::linux::Sensors) -> (Option<f64>, Option<f64>) {
     let by = |name: &str, pos: usize| {
-        let hit = s.temps.iter().find(|(l, _)| l.to_ascii_uppercase().contains(name)).or_else(|| s.temps.get(pos));
+        let hit = s
+            .temps
+            .iter()
+            .find(|(l, _)| l.to_ascii_uppercase().contains(name))
+            .or_else(|| s.temps.get(pos));
         hit.map(|(_, mv)| f64::from(*mv) / 1000.0)
     };
     (by("CPU", 0), by("GPU", 1))
@@ -736,12 +856,22 @@ fn boost_is_on(ec: &mut dyn EcAccess) -> bool {
 }
 
 /// What the popups look at right now.
-pub fn observed(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, stock: &[Preset; 3], cfg: &Config) -> crate::notify::Observed {
+pub fn observed(
+    ec: &mut dyn EcAccess,
+    sysfs: Option<&SysfsEc>,
+    stock: &[Preset; 3],
+    cfg: &Config,
+) -> crate::notify::Observed {
     crate::notify::Observed {
         profile: current(ec, stock, &cfg.custom).ok().flatten(),
-        pl: ec.read(addr::PL1_SETTING).ok().zip(ec.read(addr::PL2_SETTING).ok()),
+        pl: ec
+            .read(addr::PL1_SETTING)
+            .ok()
+            .zip(ec.read(addr::PL2_SETTING).ok()),
         boosted: !cfg.fan.enabled && boost_is_on(ec),
-        toggles: sysfs.map(|u| platform_toggles(u, has_lightbar(ec))).unwrap_or_default(),
+        toggles: sysfs
+            .map(|u| platform_toggles(u, has_lightbar(ec)))
+            .unwrap_or_default(),
     }
 }
 
@@ -778,7 +908,9 @@ pub fn fan_loop(stop: &std::sync::atomic::AtomicBool) {
         Err(e) => return eprintln!("fan engine: {e}"),
     };
     let Ok(sysfs) = SysfsEc::probe() else {
-        return eprintln!("fan engine: no uniwill hwmon (kernel driver not loaded), fans stay with the firmware");
+        return eprintln!(
+            "fan engine: no uniwill hwmon (kernel driver not loaded), fans stay with the firmware"
+        );
     };
     let mut engine = FanEngine::default();
     let mut last_err = String::new(); // a persistent error is reported once, not every tick
@@ -810,7 +942,12 @@ pub fn follow_lock(blocking: bool) -> Option<std::fs::File> {
 }
 
 fn follow_lock_at(path: &std::path::Path, blocking: bool) -> Option<std::fs::File> {
-    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).ok()?;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .ok()?;
     if blocking {
         f.lock().ok()?;
     } else {
@@ -876,12 +1013,48 @@ mod tests {
 
     #[test]
     fn presets_are_validated() {
-        assert!(Preset { pl1: 35, pl2: 35, ctgp: 0 }.validate().is_ok());
-        assert!(Preset { pl1: 80, pl2: 80, ctgp: 20 }.validate().is_ok());
-        assert!(Preset { pl1: 81, pl2: 81, ctgp: 0 }.validate().is_err());
-        assert!(Preset { pl1: 60, pl2: 50, ctgp: 0 }.validate().is_err());
-        assert!(Preset { pl1: 4, pl2: 40, ctgp: 0 }.validate().is_err());
-        assert!(Preset { pl1: 35, pl2: 35, ctgp: 26 }.validate().is_err());
+        assert!(Preset {
+            pl1: 35,
+            pl2: 35,
+            ctgp: 0
+        }
+        .validate()
+        .is_ok());
+        assert!(Preset {
+            pl1: 80,
+            pl2: 80,
+            ctgp: 20
+        }
+        .validate()
+        .is_ok());
+        assert!(Preset {
+            pl1: 81,
+            pl2: 81,
+            ctgp: 0
+        }
+        .validate()
+        .is_err());
+        assert!(Preset {
+            pl1: 60,
+            pl2: 50,
+            ctgp: 0
+        }
+        .validate()
+        .is_err());
+        assert!(Preset {
+            pl1: 4,
+            pl2: 40,
+            ctgp: 0
+        }
+        .validate()
+        .is_err());
+        assert!(Preset {
+            pl1: 35,
+            pl2: 35,
+            ctgp: 26
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]
@@ -905,9 +1078,15 @@ mod tests {
     fn only_one_process_can_follow_the_button() {
         let path = std::env::temp_dir().join(format!("ripple-follow-test-{}", std::process::id()));
         let first = follow_lock_at(&path, false).expect("free lock");
-        assert!(follow_lock_at(&path, false).is_none(), "second follower must be refused");
+        assert!(
+            follow_lock_at(&path, false).is_none(),
+            "second follower must be refused"
+        );
         drop(first);
-        assert!(follow_lock_at(&path, false).is_some(), "released lock can be taken again");
+        assert!(
+            follow_lock_at(&path, false).is_some(),
+            "released lock can be taken again"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -915,10 +1094,22 @@ mod tests {
     fn button_cycles_stock_profiles_and_restarts_from_anything_else() {
         use OperatingMode::*;
         // the button's LEDs go 0 → 1 → 2: Office → Gaming → Turbo → Office
-        assert_eq!(Profile::after_button(Some(Profile::Stock(Office))), Profile::Stock(Gaming));
-        assert_eq!(Profile::after_button(Some(Profile::Stock(Gaming))), Profile::Stock(Turbo));
-        assert_eq!(Profile::after_button(Some(Profile::Stock(Turbo))), Profile::Stock(Office));
-        assert_eq!(Profile::after_button(Some(Profile::Custom)), Profile::Stock(Turbo)); // shows as 1 light
+        assert_eq!(
+            Profile::after_button(Some(Profile::Stock(Office))),
+            Profile::Stock(Gaming)
+        );
+        assert_eq!(
+            Profile::after_button(Some(Profile::Stock(Gaming))),
+            Profile::Stock(Turbo)
+        );
+        assert_eq!(
+            Profile::after_button(Some(Profile::Stock(Turbo))),
+            Profile::Stock(Office)
+        );
+        assert_eq!(
+            Profile::after_button(Some(Profile::Custom)),
+            Profile::Stock(Turbo)
+        ); // shows as 1 light
         assert_eq!(Profile::after_button(None), Profile::Stock(Office));
         // lights: measured 0xA_ = 0 lights, 0x0_ = 1 light, 0x3_ = 2 lights
         assert_eq!(Profile::Stock(Office).mode_nibble(), 0xA);
@@ -928,16 +1119,58 @@ mod tests {
 
     #[test]
     fn hsv_matches_the_ec_levels() {
-        assert_eq!(Hsv { h: 0, s: 100, v: 100 }.to_levels(), (50, 0, 0));
-        assert_eq!(Hsv { h: 120, s: 100, v: 100 }.to_levels(), (0, 50, 0));
+        assert_eq!(
+            Hsv {
+                h: 0,
+                s: 100,
+                v: 100
+            }
+            .to_levels(),
+            (50, 0, 0)
+        );
+        assert_eq!(
+            Hsv {
+                h: 120,
+                s: 100,
+                v: 100
+            }
+            .to_levels(),
+            (0, 50, 0)
+        );
         assert_eq!(Hsv { h: 0, s: 0, v: 100 }.to_levels(), (50, 50, 50));
-        assert_eq!(Hsv { h: 0, s: 100, v: 50 }.to_levels(), (25, 0, 0));
-        assert_eq!(Hsv { h: 200, s: 40, v: 0 }.to_levels(), (0, 0, 0));
+        assert_eq!(
+            Hsv {
+                h: 0,
+                s: 100,
+                v: 50
+            }
+            .to_levels(),
+            (25, 0, 0)
+        );
+        assert_eq!(
+            Hsv {
+                h: 200,
+                s: 40,
+                v: 0
+            }
+            .to_levels(),
+            (0, 0, 0)
+        );
         // the firmware's default colour is cyan at full brightness
-        assert_eq!(Hsv::from_levels((0, 50, 50)), Hsv { h: 180, s: 100, v: 100 });
+        assert_eq!(
+            Hsv::from_levels((0, 50, 50)),
+            Hsv {
+                h: 180,
+                s: 100,
+                v: 100
+            }
+        );
         for c in [(50, 0, 0), (0, 50, 25), (10, 20, 30), (50, 50, 50)] {
             let back = Hsv::from_levels(c).to_levels();
-            assert!(back.0.abs_diff(c.0) <= 1 && back.1.abs_diff(c.1) <= 1 && back.2.abs_diff(c.2) <= 1, "{c:?} -> {back:?}");
+            assert!(
+                back.0.abs_diff(c.0) <= 1 && back.1.abs_diff(c.1) <= 1 && back.2.abs_diff(c.2) <= 1,
+                "{c:?} -> {back:?}"
+            );
         }
     }
 
@@ -945,14 +1178,43 @@ mod tests {
     fn current_prefers_stock_over_custom() {
         struct Fake(u8, u8);
         impl EcAccess for Fake {
-            fn name(&self) -> &str { "fake" }
-            fn read(&mut self, a: u16) -> HwResult<u8> { Ok(if a == addr::PL1_SETTING { self.0 } else { self.1 }) }
-            fn write(&mut self, _: u16, _: u8) -> HwResult<()> { Ok(()) }
+            fn name(&self) -> &str {
+                "fake"
+            }
+            fn read(&mut self, a: u16) -> HwResult<u8> {
+                Ok(if a == addr::PL1_SETTING {
+                    self.0
+                } else {
+                    self.1
+                })
+            }
+            fn write(&mut self, _: u16, _: u8) -> HwResult<()> {
+                Ok(())
+            }
         }
         let st = stock(None);
-        let custom = Preset { pl1: 35, pl2: 35, ctgp: 5 }; // same limits as Office
-        assert_eq!(current(&mut Fake(35, 35), &st, &custom).unwrap(), Some(Profile::Stock(OperatingMode::Office)));
-        assert_eq!(current(&mut Fake(45, 45), &st, &Preset { pl1: 45, pl2: 45, ctgp: 0 }).unwrap(), Some(Profile::Custom));
+        let custom = Preset {
+            pl1: 35,
+            pl2: 35,
+            ctgp: 5,
+        }; // same limits as Office
+        assert_eq!(
+            current(&mut Fake(35, 35), &st, &custom).unwrap(),
+            Some(Profile::Stock(OperatingMode::Office))
+        );
+        assert_eq!(
+            current(
+                &mut Fake(45, 45),
+                &st,
+                &Preset {
+                    pl1: 45,
+                    pl2: 45,
+                    ctgp: 0
+                }
+            )
+            .unwrap(),
+            Some(Profile::Custom)
+        );
         assert_eq!(current(&mut Fake(50, 50), &st, &custom).unwrap(), None);
     }
 
@@ -988,43 +1250,94 @@ mod tests {
         set_curve_point(&mut c, 4, 0);
         assert_eq!(c, [0, 0, 0, 0, 0]);
         // a curve that lets the fans stop at 85 °C is refused
-        assert!(FanCurves { cpu: c, ..FanCurves::default() }.validate().is_err());
-        assert!(FanCurves { gpu: [0, 0, 0, 0, 59], ..FanCurves::default() }.validate().is_err());
-        assert!(FanCurves { gpu: [0, 0, 0, 0, 60], ..FanCurves::default() }.validate().is_ok());
+        assert!(FanCurves {
+            cpu: c,
+            ..FanCurves::default()
+        }
+        .validate()
+        .is_err());
+        assert!(FanCurves {
+            gpu: [0, 0, 0, 0, 59],
+            ..FanCurves::default()
+        }
+        .validate()
+        .is_err());
+        assert!(FanCurves {
+            gpu: [0, 0, 0, 0, 60],
+            ..FanCurves::default()
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]
     fn fan_targets_fail_safe() {
         let cfg = FanCurves::default();
         assert_eq!(fan_targets(&cfg, Some(45.0), Some(45.0)), [20, 0]);
-        assert_eq!(fan_targets(&cfg, Some(89.0), Some(40.0))[0], curve_duty(&cfg.cpu, 89.0));
+        assert_eq!(
+            fan_targets(&cfg, Some(89.0), Some(40.0))[0],
+            curve_duty(&cfg.cpu, 89.0)
+        );
         assert_eq!(fan_targets(&cfg, Some(90.0), Some(40.0)), [100, 100]); // either sensor hot
         assert_eq!(fan_targets(&cfg, Some(40.0), Some(95.0)), [100, 100]);
-        assert_eq!(fan_targets(&cfg, None, Some(65.0)), [curve_duty(&cfg.cpu, 65.0), curve_duty(&cfg.gpu, 65.0)]);
+        assert_eq!(
+            fan_targets(&cfg, None, Some(65.0)),
+            [curve_duty(&cfg.cpu, 65.0), curve_duty(&cfg.gpu, 65.0)]
+        );
         assert_eq!(fan_targets(&cfg, None, None), [100, 100]); // blind = flat out
         assert!(FanCurves::default().validate().is_ok());
-        assert!(FanCurves { cpu: [20, 30, 25, 70, 100], ..FanCurves::default() }.validate().is_err());
-        assert!(FanCurves { gpu: [0, 25, 40, 65, 101], ..FanCurves::default() }.validate().is_err());
+        assert!(FanCurves {
+            cpu: [20, 30, 25, 70, 100],
+            ..FanCurves::default()
+        }
+        .validate()
+        .is_err());
+        assert!(FanCurves {
+            gpu: [0, 25, 40, 65, 101],
+            ..FanCurves::default()
+        }
+        .validate()
+        .is_err());
     }
 
     /// A mock EC with the two fan duty registers.
     struct FanEc(crate::mock::MockEc, [u8; 2]);
     impl EcAccess for FanEc {
-        fn name(&self) -> &str { "fan-mock" }
-        fn read(&mut self, a: u16) -> HwResult<u8> { self.0.read(a) }
-        fn write(&mut self, a: u16, v: u8) -> HwResult<()> { self.0.write(a, v) }
-        fn fan_duty(&mut self, f: u8) -> HwResult<u8> { Ok(self.1[usize::from(f) - 1]) }
-        fn set_fan_duty(&mut self, f: u8, d: u8) -> HwResult<()> { self.1[usize::from(f) - 1] = d; Ok(()) }
+        fn name(&self) -> &str {
+            "fan-mock"
+        }
+        fn read(&mut self, a: u16) -> HwResult<u8> {
+            self.0.read(a)
+        }
+        fn write(&mut self, a: u16, v: u8) -> HwResult<()> {
+            self.0.write(a, v)
+        }
+        fn fan_duty(&mut self, f: u8) -> HwResult<u8> {
+            Ok(self.1[usize::from(f) - 1])
+        }
+        fn set_fan_duty(&mut self, f: u8, d: u8) -> HwResult<()> {
+            self.1[usize::from(f) - 1] = d;
+            Ok(())
+        }
     }
 
     #[test]
     fn engine_takes_over_on_top_of_the_mode_and_hands_back() {
-        let mut ec = FanEc(crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0xA7), [60, 0]); // Balanced
-        let cfg = FanCurves { enabled: true, ..FanCurves::default() };
-        let mut eng = FanEngine { settle: std::time::Duration::ZERO, ..FanEngine::default() };
+        let mut ec = FanEc(
+            crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0xA7),
+            [60, 0],
+        ); // Balanced
+        let cfg = FanCurves {
+            enabled: true,
+            ..FanCurves::default()
+        };
+        let mut eng = FanEngine {
+            settle: std::time::Duration::ZERO,
+            ..FanEngine::default()
+        };
         eng.tick(&mut ec, &cfg, Some(65.0), Some(65.0)).unwrap();
         assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0xE7); // mode nibble kept, manual bit on
-        // at 65 °C the curves say 45 % (CPU) and 40 % (GPU): both above what the firmware ran, so at once
+                                                                      // at 65 °C the curves say 45 % (CPU) and 40 % (GPU): both above what the firmware ran, so at once
         assert_eq!(ec.1, [duty_to_ec(45), duty_to_ec(40)]);
         // a hot GPU alone pushes both fans to the top at once
         eng.tick(&mut ec, &cfg, Some(60.0), Some(91.0)).unwrap();
@@ -1034,7 +1347,8 @@ mod tests {
         eng.tick(&mut ec, &cfg, Some(60.0), Some(60.0)).unwrap();
         assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x77);
         // switched off: the firmware gets the fans back, mode intact
-        eng.tick(&mut ec, &FanCurves::default(), Some(60.0), Some(60.0)).unwrap();
+        eng.tick(&mut ec, &FanCurves::default(), Some(60.0), Some(60.0))
+            .unwrap();
         assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x37);
     }
 
@@ -1062,24 +1376,45 @@ mod tests {
     fn which_attributes_become_toggles() {
         for lightbar in [false, true] {
             assert!(!toggle_shown("ctgp_offset", lightbar)); // the profiles' business
-            // shown everywhere (the doubtful ones are marked experimental, not hidden)
-            for name in ["fn_lock", "super_key_enable", "ac_auto_boot", "usb_powershare_high", "breathing_in_suspend", "touchpad_toggle_enable"] {
-                assert!(toggle_shown(name, lightbar), "{name} (lightbar: {lightbar})");
+                                                             // shown everywhere (the doubtful ones are marked experimental, not hidden)
+            for name in [
+                "fn_lock",
+                "super_key_enable",
+                "ac_auto_boot",
+                "usb_powershare_high",
+                "breathing_in_suspend",
+                "touchpad_toggle_enable",
+            ] {
+                assert!(
+                    toggle_shown(name, lightbar),
+                    "{name} (lightbar: {lightbar})"
+                );
             }
         }
         // the old lightbar animation only with a lightbar
-        assert!(!toggle_shown("rainbow_animation", false) && toggle_shown("rainbow_animation", true));
+        assert!(
+            !toggle_shown("rainbow_animation", false) && toggle_shown("rainbow_animation", true)
+        );
     }
 
     #[test]
     fn the_touchpad_choice_defaults_to_on_and_survives_an_old_config() {
         assert!(serde_json::from_str::<Config>("{}").unwrap().touchpad_on);
-        assert!(!serde_json::from_str::<Config>(r#"{"touchpad_on":false}"#).unwrap().touchpad_on);
+        assert!(
+            !serde_json::from_str::<Config>(r#"{"touchpad_on":false}"#)
+                .unwrap()
+                .touchpad_on
+        );
     }
 
     #[test]
     fn boost_is_the_manual_bit_with_both_fans_at_full() {
-        let boosted = |byte: u8, duties: [u8; 2]| boost_is_on(&mut FanEc(crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, byte), duties));
+        let boosted = |byte: u8, duties: [u8; 2]| {
+            boost_is_on(&mut FanEc(
+                crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, byte),
+                duties,
+            ))
+        };
         assert!(boosted(0x47, [200, 200])); // Boost
         assert!(!boosted(0x47, [60, 40])); // the custom profile's byte in Enthusiast, curve duties: not a boost
         assert!(!boosted(0x47, [200, 40])); // one fan at full only
@@ -1089,11 +1424,23 @@ mod tests {
 
     #[test]
     fn engine_leaves_a_users_boost_alone() {
-        let mut ec = FanEc(crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0x40), [200, 200]);
-        let cfg = FanCurves { enabled: true, ..FanCurves::default() };
-        let mut eng = FanEngine { settle: std::time::Duration::ZERO, ..FanEngine::default() };
+        let mut ec = FanEc(
+            crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0x40),
+            [200, 200],
+        );
+        let cfg = FanCurves {
+            enabled: true,
+            ..FanCurves::default()
+        };
+        let mut eng = FanEngine {
+            settle: std::time::Duration::ZERO,
+            ..FanEngine::default()
+        };
         eng.tick(&mut ec, &cfg, Some(40.0), Some(40.0)).unwrap();
-        assert_eq!((ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), ec.1), (0x40, [200, 200]));
+        assert_eq!(
+            (ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), ec.1),
+            (0x40, [200, 200])
+        );
         eng.stop(&mut ec).unwrap(); // not ours: nothing is released
         assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x40);
     }
@@ -1136,9 +1483,16 @@ mod tests {
 
     #[test]
     fn keyboard_choice_follows_the_ec_when_it_changed() {
-        let saved = Hsv { h: 0, s: 100, v: 50 }; // dim red: levels (25, 0, 0)
+        let saved = Hsv {
+            h: 0,
+            s: 100,
+            v: 50,
+        }; // dim red: levels (25, 0, 0)
         assert_eq!(keyboard_choice(Some(saved), Some((25, 0, 0))), Some(saved));
-        assert_eq!(keyboard_choice(Some(saved), Some((0, 0, 50))), Some(Hsv::from_levels((0, 0, 50))));
+        assert_eq!(
+            keyboard_choice(Some(saved), Some((0, 0, 50))),
+            Some(Hsv::from_levels((0, 0, 50)))
+        );
         assert_eq!(keyboard_choice(Some(saved), None), Some(saved));
         assert_eq!(keyboard_choice(None, None), None);
     }
@@ -1147,7 +1501,11 @@ mod tests {
     fn boot_state_is_read_from_the_mode_byte() {
         use OperatingMode::*;
         let st = stock(None);
-        let custom = Preset { pl1: 45, pl2: 45, ctgp: 0 };
+        let custom = Preset {
+            pl1: 45,
+            pl2: 45,
+            ctgp: 0,
+        };
         let cur = |pl, byte| current(&mut ec_with(pl, byte), &st, &custom).unwrap();
         // measured right after a boot on the real machine: PL regs 0/0, mode byte 0x00 (1 light)
         assert_eq!(cur((0, 0), 0x00), Some(Profile::Stock(Gaming)));
@@ -1163,15 +1521,28 @@ mod tests {
     #[test]
     fn adopt_writes_the_limits_of_the_profile_the_lights_show() {
         let st = stock(None);
-        let custom = Preset { pl1: 45, pl2: 45, ctgp: 0 };
+        let custom = Preset {
+            pl1: 45,
+            pl2: 45,
+            ctgp: 0,
+        };
         let mut ec = ec_with((0, 0), 0x07);
         let p = adopt(&mut ec, None, &st, &custom).unwrap();
         assert_eq!(p, Some(Profile::Stock(OperatingMode::Gaming)));
-        assert_eq!((ec.read(addr::PL1_SETTING).unwrap(), ec.read(addr::PL2_SETTING).unwrap()), (55, 55));
+        assert_eq!(
+            (
+                ec.read(addr::PL1_SETTING).unwrap(),
+                ec.read(addr::PL2_SETTING).unwrap()
+            ),
+            (55, 55)
+        );
         assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x07); // lights untouched
-        // limits that are already set are left alone
+                                                                      // limits that are already set are left alone
         let mut ec = ec_with((45, 45), 0x07);
-        assert_eq!(adopt(&mut ec, None, &st, &custom).unwrap(), Some(Profile::Custom));
+        assert_eq!(
+            adopt(&mut ec, None, &st, &custom).unwrap(),
+            Some(Profile::Custom)
+        );
         assert_eq!(ec.read(addr::PL1_SETTING).unwrap(), 45);
     }
 }
