@@ -23,7 +23,7 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use hw::{FanMode, Field, Hw, Snapshot, PROFILES};
-use ripple_hw::notify::toggle_label;
+use ripple_hw::notify::{ensure_tray, is_experimental, toggle_label};
 use ripple_core::modes::OperatingMode;
 use ripple_hw::control::{self, Hsv, Preset, Profile};
 use settings::Settings;
@@ -1068,8 +1068,9 @@ impl Ui {
                 "super_key_enable" => "The Super (Windows) key works",
                 "ac_auto_boot" => "Power on when AC is plugged in",
                 "usb_powershare_high" => "Keep the USB ports powered when off",
-                "breathing_in_suspend" => "Breathing LED animation while suspended on AC power",
-                "touchpad_toggle_enable" => "Firmware touchpad toggle; its LED lights while suspended",
+                "touchpad" => "Off powers the touchpad down: no pointer, its LED lights (as in suspend)",
+                "breathing_in_suspend" => "Breathing LED animation while suspended on AC power (a lightbar feature)",
+                "touchpad_toggle_enable" => "The firmware's own touchpad toggle; no effect seen on this laptop",
                 _ => "",
             }
         }
@@ -1092,7 +1093,18 @@ impl Ui {
         }
         for (i, (name, on)) in s.toggles.iter().copied().enumerate() {
             toggles = toggles.child(
-                div().flex().justify_between().items_center().gap_4().child(div().child(toggle_label(name)).child(note(p, describe(name)))).child(
+                div().flex().justify_between().items_center().gap_4().child(
+                    div()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(toggle_label(name))
+                                .when(is_experimental(name), |d| d.child(div().text_size(px(11.)).text_color(rgb(p.muted)).child("experimental"))),
+                        )
+                        .child(note(p, describe(name))),
+                ).child(
                     button(p, ("toggle", i), if on { "On" } else { "Off" }, on)
                         .on_click(cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on)))),
                 ),
@@ -1311,6 +1323,16 @@ impl Render for Ui {
 
 // ------------------------------------------------------------------ startup
 
+/// Where `rcc-tray` lives: next to this binary (installed, or a build directory), else the usual places.
+fn tray_binary() -> std::path::PathBuf {
+    let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("rcc-tray")));
+    beside
+        .into_iter()
+        .chain(["/usr/local/bin/rcc-tray", "/usr/bin/rcc-tray"].map(std::path::PathBuf::from))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| "/usr/local/bin/rcc-tray".into())
+}
+
 /// Held for as long as the app runs; `/run/ripple-nova-gui.lock` is also what the launcher looks at.
 /// `Err` = another instance holds it. A lock file that cannot even be opened (not root: the smoke
 /// tests) does not stop anything.
@@ -1401,6 +1423,11 @@ fn main() {
             return;
         }
     };
+    // The tray icon belongs to the window's life: closing the window leaves the icon, the icon opens the window.
+    // It runs in the user's session, so a root window starts it as that user (nothing happens if it runs).
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        ensure_tray(std::path::Path::new(&dir), &tray_binary());
+    }
     let hw = Arc::new(Mutex::new(Hw::open()));
     spawn_mode_button(hw.clone());
     let shared = Arc::new(Shared {

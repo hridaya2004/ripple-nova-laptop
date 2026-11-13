@@ -170,7 +170,9 @@ impl Hw {
         };
         let (stock, custom) = (self.stock, self.cfg.custom);
         // the CLI edits the fan profile too: always start from what is saved
-        self.cfg.fan = Config::load().fan;
+        let saved = Config::load();
+        self.cfg.fan = saved.fan;
+        self.cfg.touchpad_on = saved.touchpad_on; // chosen elsewhere too (CLI, daemon): never write back a stale one
         s.fan = self.cfg.fan.clone();
         if let Some(ec) = self.ec.as_deref_mut() {
             s.profile = control::current(ec, &stock, &custom).ok().flatten();
@@ -405,6 +407,11 @@ impl Hw {
     }
 
     pub fn set_toggle(&self, name: &'static str, on: bool) -> Result<String, String> {
+        if name == "touchpad" {
+            // not a sysfs attribute: powering the touchpad down (LED on) or up
+            control::set_touchpad(on).map_err(|e| e.to_string())?;
+            return Ok(format!("touchpad → {}", if on { "on" } else { "off" }));
+        }
         let u = self.sysfs.as_ref().ok_or("uniwill kernel driver not loaded")?;
         u.set_attr(name, if on { "on" } else { "off" }).map_err(|e| e.to_string())?;
         Ok(format!("{name} → {}", if on { "on" } else { "off" }))
