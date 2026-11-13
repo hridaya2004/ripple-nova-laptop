@@ -34,6 +34,38 @@ pub fn send_to(dir: &Path, title: &str, body: &str) {
     });
 }
 
+/// Is a process with this name (`comm`, at most 15 characters) running?
+fn process_running(comm: &str) -> bool {
+    std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|e| {
+        e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())
+            && std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim_end() == comm)
+    })
+}
+
+/// Make sure the tray icon helper runs in the session whose runtime directory is `dir`: the window needs it
+/// (closing the window leaves the icon, and the icon opens the window again). The icon belongs to the desktop
+/// user's session bus, which a root process cannot join, so it is started as that user, in its own transient
+/// user service (it outlives the window and the terminal). Best effort; nothing happens when it already runs.
+pub fn ensure_tray(dir: &Path, tray: &Path) {
+    let Ok(md) = std::fs::metadata(dir) else { return };
+    let (uid, gid) = (md.uid(), md.gid());
+    if uid == 0 || !tray.exists() || process_running("rcc-tray") {
+        return;
+    }
+    let (dir, tray) = (dir.to_path_buf(), tray.to_path_buf());
+    std::thread::spawn(move || {
+        let _ = Command::new("setpriv")
+            .args(["--reuid", &uid.to_string(), "--regid", &gid.to_string(), "--clear-groups"])
+            .args(["systemd-run", "--user", "--quiet", "--collect", "--unit=ripple-nova-tray"])
+            .arg(&tray)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}/bus", dir.display()))
+            .status();
+    });
+}
+
 /// Send to everyone logged in (the daemon has no session of its own).
 pub fn send_to_logged_in(title: &str, body: &str) {
     for dir in session_dirs(Path::new("/run/user")) {
@@ -61,6 +93,11 @@ fn popups_from(json: &str) -> bool {
         .ok()
         .and_then(|v| v.get("popups").and_then(|p| p.as_bool()))
         .unwrap_or(true)
+}
+
+/// Toggles whose effect is not established on every machine (or was not seen here): the window marks them.
+pub fn is_experimental(name: &str) -> bool {
+    matches!(name, "touchpad" | "touchpad_toggle_enable" | "breathing_in_suspend" | "ac_auto_boot" | "usb_powershare_high")
 }
 
 /// How a platform toggle is named in the window and in popups.
@@ -139,11 +176,24 @@ mod tests {
     fn toggle_labels_use_the_real_sysfs_names() {
         // the keys are the kernel attribute names (see PLATFORM_ATTRS); a typo here leaves the raw name on screen
         for name in crate::linux::PLATFORM_ATTRS {
-            if matches!(*name, "fn_lock" | "super_key_enable" | "ac_auto_boot" | "usb_powershare_high" | "breathing_in_suspend" | "touchpad_toggle_enable") {
+            if matches!(*name, "fn_lock" | "super_key_enable" | "ac_auto_boot" | "usb_powershare_high") {
                 assert_ne!(toggle_label(name), *name, "{name} has no label");
             }
         }
         assert_eq!(toggle_label("ac_auto_boot"), "AC Auto-Boot");
+        assert_eq!(toggle_label("touchpad"), "Touchpad power"); // the touchpad switch is not a sysfs attribute
+        // every toggle the user called experimental is marked, the plain ones are not
+        for name in ["touchpad", "touchpad_toggle_enable", "breathing_in_suspend", "ac_auto_boot", "usb_powershare_high"] {
+            assert!(is_experimental(name), "{name}");
+        }
+        assert!(!is_experimental("fn_lock") && !is_experimental("super_key_enable"));
+    }
+
+    #[test]
+    fn process_lookup_finds_this_process_and_not_a_made_up_one() {
+        let me = std::fs::read_to_string("/proc/self/comm").unwrap();
+        assert!(process_running(me.trim_end()));
+        assert!(!process_running("no-such-process"));
     }
 
     #[test]
