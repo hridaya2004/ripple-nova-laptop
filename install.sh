@@ -53,7 +53,7 @@ uninstall() {
         "$DESTDIR/etc/xdg/autostart/ripple-nova.desktop" \
         "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop" \
         "$DESTDIR"/usr/lib/modules/*/updates/uniwill-laptop.ko
-    $SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"   # the app's own open-at-login copy
+    $SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"   # what older versions' "Open at login" left (the window itself)
     live && { systemctl --user stop ripple-nova-tray 2>/dev/null; pkill -x rcc-tray 2>/dev/null; true; }   # the icon helper runs as you (not running is fine)
     live && $SUDO systemctl daemon-reload
     live && $SUDO depmod -a   # forget the out-of-tree uniwill-laptop (the kernel's own one is used again)
@@ -131,6 +131,10 @@ $SUDO install -Dm755 target/release/rcc "$DESTDIR$BINDIR/rcc"
 $SUDO install -Dm755 target/release/rcc-gui "$DESTDIR$BINDIR/rcc-gui"
 $SUDO install -Dm755 target/release/rcc-tray "$DESTDIR$BINDIR/rcc-tray"
 $SUDO install -Dm644 "$tmp/tray.desktop" "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop"
+# Only the tray icon starts at login now. Older versions had "Open at login" (the window itself, minimized):
+# remove its login entry and its root-owned copy, or the window would still open at every login.
+$SUDO rm -f "$DESTDIR/etc/xdg/autostart/ripple-nova.desktop"
+$SUDO rm -rf "$DESTDIR/usr/local/lib/ripple-nova"
 $SUDO install -Dm755 "$tmp/launcher" "$DESTDIR$BINDIR/ripple-nova"
 $SUDO install -Dm644 dist/ripple-nova.desktop "$DESTDIR$PREFIX/share/applications/ripple-nova.desktop"
 $SUDO install -Dm644 dist/ripple-nova.svg "$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps/ripple-nova.svg"
@@ -163,13 +167,6 @@ fi
 if live; then
     command -v update-desktop-database >/dev/null && $SUDO update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
     command -v gtk-update-icon-cache >/dev/null && $SUDO gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
-    # "Open at login" keeps its own root-owned copy of the window and a login script (so the build directory
-    # is never what runs as root). They go stale when this script installs a newer build: an old copy would
-    # start at the next login with its own popups and no control socket. Refresh them from the new binary.
-    if [ -e /etc/xdg/autostart/ripple-nova.desktop ]; then
-        say "refreshing the open-at-login copy of the window"
-        $SUDO "$BINDIR/rcc-gui" --autostart on >/dev/null || warn "could not refresh the open-at-login copy: run  sudo $BINDIR/rcc-gui --autostart on"
-    fi
     say "starting the tray icon helper (it waits until the desktop has a tray)"
     systemctl --user stop ripple-nova-tray 2>/dev/null || true
     pkill -x rcc-tray 2>/dev/null || true

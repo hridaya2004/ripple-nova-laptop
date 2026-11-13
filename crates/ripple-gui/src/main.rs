@@ -5,7 +5,6 @@
 //! hardware I/O runs on GPUI's background executor behind one mutex, so the render path
 //! never blocks.
 
-mod autostart;
 mod hw;
 mod remote;
 mod settings;
@@ -88,16 +87,14 @@ impl Palette {
     }
 }
 
-/// `rcc-gui [--tab profiles|fan|keyboard|system|settings] [--open] [--light] [--size WxH] [--minimized]`:
+/// `rcc-gui [--tab profiles|fan|keyboard|system|settings] [--open] [--light] [--size WxH]`:
 /// where to start (handy for screenshots; `--light` forces the light theme for this run).
-/// `rcc-gui --autostart on|off|status` installs/removes/shows the open-at-login entry and exits.
 #[derive(Clone, Copy)]
 struct Start {
     tab: Tab,
     open: bool,
     light: bool,
     size: Option<(f32, f32)>,
-    minimized: bool,
 }
 
 impl Start {
@@ -108,7 +105,6 @@ impl Start {
             open: false,
             light: false,
             size: None,
-            minimized: false,
         }
     }
 
@@ -139,7 +135,6 @@ impl Start {
             open: args.iter().any(|a| a == "--open"),
             light: args.iter().any(|a| a == "--light"),
             size,
-            minimized: args.iter().any(|a| a == "--minimized"),
         }
     }
 }
@@ -218,8 +213,6 @@ struct Ui {
     dropdown_open: bool,
     font_open: bool,
     font_scroll: UniformListScrollHandle,
-    /// Is the open-at-login entry installed?
-    autostart: bool,
     /// Profile under the mouse in the dropdown, shown in the "what changes" panel.
     preview: Option<Profile>,
     sliders: Rc<RefCell<HashMap<&'static str, SliderReg>>>,
@@ -264,7 +257,6 @@ impl Ui {
             dropdown_open: start.open && start.tab == Tab::Profiles,
             font_open: start.open && start.tab == Tab::Settings,
             font_scroll,
-            autostart: autostart::Layout::system().is_enabled(),
             preview: None,
             sliders: Rc::new(RefCell::new(HashMap::new())),
             drag: None,
@@ -312,37 +304,6 @@ impl Ui {
         self.shared.publish(snap.clone());
         self.snap = snap;
         cx.notify();
-    }
-
-    /// Switch the open-at-login entry; the result (or error) goes to the status bar.
-    fn toggle_autostart(&mut self, cx: &mut Context<Self>) {
-        let layout = autostart::Layout::system();
-        let res = if layout.is_enabled() {
-            layout.disable().map(|()| "open at login: off".to_string())
-        } else {
-            std::env::current_exe()
-                .and_then(|exe| layout.enable(&exe, self.settings.start_minimized))
-                .map(|()| "open at login: on".to_string())
-        };
-        self.hw.lock().unwrap_or_else(|e| e.into_inner()).event =
-            res.unwrap_or_else(|e| format!("error: open at login: {e}"));
-        self.autostart = layout.is_enabled();
-        cx.notify();
-    }
-
-    /// "Start minimized": saved, and the login script is rewritten when open-at-login is on.
-    fn toggle_start_minimized(&mut self, cx: &mut Context<Self>) {
-        self.settings.start_minimized = !self.settings.start_minimized;
-        let layout = autostart::Layout::system();
-        if layout.is_enabled() {
-            let res = std::env::current_exe()
-                .and_then(|exe| layout.enable(&exe, self.settings.start_minimized));
-            if let Err(e) = res {
-                self.hw.lock().unwrap_or_else(|e| e.into_inner()).event =
-                    format!("error: open at login: {e}");
-            }
-        }
-        self.save_settings(cx);
     }
 
     /// Persist UI preferences; failures show up in the status bar.
@@ -1662,24 +1623,7 @@ impl Ui {
                 ),
             ));
 
-        let startup = section(p, "Startup")
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(button(p, "autostart", if self.autostart { "On" } else { "Off" }, self.autostart).on_click(cx.listener(|ui, _, _, cx| ui.toggle_autostart(cx))))
-                    .child("Open at login"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(button(p, "start-min", if self.settings.start_minimized { "On" } else { "Off" }, self.settings.start_minimized).on_click(cx.listener(|ui, _, _, cx| ui.toggle_start_minimized(cx))))
-                    .child("Start minimized"),
-            )
-            .child(note(p, "Open at login starts the window at login (no password: the sudoers rule from install.sh, else polkit asks). Start minimized starts it minimized, out of the way until you open it (dash, or the tray icon)."));
+        let startup = section(p, "Startup").child(note(p, "At login only the tray icon starts: click it to open this window, or use its menu to switch the performance profile. The service (ripple-nova.service) does the rest in the background. GNOME shows the icon with the AppIndicator extension."));
 
         div()
             .flex()
@@ -1824,34 +1768,6 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
-    if let Some(cmd) = args
-        .iter()
-        .position(|a| a == "--autostart")
-        .and_then(|i| args.get(i + 1))
-    {
-        let layout = autostart::Layout::system();
-        let res = match cmd.as_str() {
-            "on" => std::env::current_exe()
-                .and_then(|exe| layout.enable(&exe, Settings::load().start_minimized)),
-            "off" => layout.disable(),
-            "status" => Ok(()),
-            other => {
-                eprintln!("error: --autostart takes on|off|status, got '{other}'");
-                std::process::exit(2);
-            }
-        };
-        match res {
-            Ok(()) => println!(
-                "open at login: {}",
-                if layout.is_enabled() { "on" } else { "off" }
-            ),
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
     // One window per machine: a second root GUI would follow the button twice and double every popup.
     // (The launcher checks this lock too, before it asks for anything.)
     let _instance = match single_instance() {
@@ -1893,7 +1809,7 @@ fn main() {
             }
         })
         .detach();
-        open_main_window(cx, shared.clone(), start); // --minimized: the window starts minimized
+        open_main_window(cx, shared.clone(), start);
         cx.activate(true);
         // Whoever lives in the user's session (the tray, the launcher) can ask the window to come forward or close.
         if let Some(commands) = commands {
@@ -1919,7 +1835,6 @@ fn main() {
 }
 
 fn open_main_window(cx: &mut App, shared: Arc<Shared>, start: Start) {
-    let minimized = start.minimized;
     let (w, h) = start.size.unwrap_or((860., 640.));
     let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
     cx.open_window(
@@ -1935,12 +1850,7 @@ fn open_main_window(cx: &mut App, shared: Arc<Shared>, start: Start) {
             app_id: Some("ripple-nova".into()),
             ..Default::default()
         },
-        move |window, cx| {
-            if minimized {
-                window.minimize_window();
-            }
-            cx.new(|cx| Ui::new(shared, start, cx))
-        },
+        move |_, cx| cx.new(|cx| Ui::new(shared, start, cx)),
     )
     .unwrap();
 }

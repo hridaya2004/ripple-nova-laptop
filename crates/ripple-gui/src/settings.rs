@@ -19,9 +19,6 @@ pub struct Settings {
     /// a missing key (an old file) must read as on, not as serde's `false`.
     #[serde(default = "yes")]
     pub popups: bool,
-    /// Open at login without showing the window (it starts minimized). On unless switched off.
-    #[serde(default = "yes")]
-    pub start_minimized: bool,
 }
 
 fn yes() -> bool {
@@ -34,7 +31,6 @@ impl Default for Settings {
             light: false,
             font: None,
             popups: true,
-            start_minimized: true,
         }
     }
 }
@@ -95,21 +91,21 @@ mod tests {
     #[test]
     fn defaults_are_dark_system_font_and_roundtrip() {
         let d = Settings::default();
-        assert!(!d.light && d.font.is_none() && d.popups && d.start_minimized);
+        assert!(!d.light && d.font.is_none() && d.popups);
         let s = Settings {
             light: true,
             font: Some("Fira Code".into()),
             popups: false,
-            start_minimized: false,
         };
         assert_eq!(
             serde_json::from_str::<Settings>(&serde_json::to_string(&s).unwrap()).unwrap(),
             s
         );
-        // old/partial files (even with the removed all_fonts key) still load
+        // old/partial files (even with the removed all_fonts / start_minimized keys) still load
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), d);
         assert_eq!(
-            serde_json::from_str::<Settings>(r#"{"all_fonts":true}"#).unwrap(),
+            serde_json::from_str::<Settings>(r#"{"all_fonts":true,"start_minimized":true}"#)
+                .unwrap(),
             d
         );
         // a file written before the option existed keeps popups on
@@ -122,16 +118,6 @@ mod tests {
             !serde_json::from_str::<Settings>(r#"{"popups":false}"#)
                 .unwrap()
                 .popups
-        );
-        assert!(
-            serde_json::from_str::<Settings>("{}")
-                .unwrap()
-                .start_minimized
-        );
-        assert!(
-            !serde_json::from_str::<Settings>(r#"{"start_minimized":false}"#)
-                .unwrap()
-                .start_minimized
         );
     }
 }
