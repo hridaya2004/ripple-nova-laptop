@@ -680,13 +680,21 @@ pub fn platform_toggles(u: &SysfsEc, has_lightbar: bool) -> Vec<(&'static str, b
         .collect()
 }
 
+/// Is Boost on? Boost is the manual bit with both duties at full (200). In Enthusiast the custom fan
+/// profile's manual byte is the very same `0x40`, and while the engine hands the fans back after the
+/// profile is switched off the byte is still set: the duties (the profile's curve, not full) tell them apart.
+fn boost_is_on(ec: &mut dyn EcAccess) -> bool {
+    ec.read(addr::MAFAN_CONTROL_BYTE).is_ok_and(is_boosted)
+        && ec.fan_duty(1).is_ok_and(|d| d >= 200)
+        && ec.fan_duty(2).is_ok_and(|d| d >= 200)
+}
+
 /// What the popups look at right now.
 pub fn observed(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, stock: &[Preset; 3], cfg: &Config) -> crate::notify::Observed {
     crate::notify::Observed {
         profile: current(ec, stock, &cfg.custom).ok().flatten(),
         pl: ec.read(addr::PL1_SETTING).ok().zip(ec.read(addr::PL2_SETTING).ok()),
-        // with the custom fan profile on, bit 6 is its manual bit, not a boost
-        boosted: !cfg.fan.enabled && ec.read(addr::MAFAN_CONTROL_BYTE).is_ok_and(is_boosted),
+        boosted: !cfg.fan.enabled && boost_is_on(ec),
         toggles: sysfs.map(|u| platform_toggles(u, has_lightbar(ec))).unwrap_or_default(),
     }
 }
@@ -1002,6 +1010,16 @@ mod tests {
         assert_eq!(run(0x77, Profile::Stock(Office), true), 0xE7);
         // profile off: plain mode change
         assert_eq!(run(0xA7, Profile::Stock(Gaming), false), 0x07);
+    }
+
+    #[test]
+    fn boost_is_the_manual_bit_with_both_fans_at_full() {
+        let boosted = |byte: u8, duties: [u8; 2]| boost_is_on(&mut FanEc(crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, byte), duties));
+        assert!(boosted(0x47, [200, 200])); // Boost
+        assert!(!boosted(0x47, [60, 40])); // the custom profile's byte in Enthusiast, curve duties: not a boost
+        assert!(!boosted(0x47, [200, 40])); // one fan at full only
+        assert!(!boosted(0x07, [200, 200])); // no manual bit
+        assert!(!boosted(0xE7, [200, 200])); // Balanced + manual is not the boost nibble
     }
 
     #[test]
