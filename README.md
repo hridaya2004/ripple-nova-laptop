@@ -161,7 +161,7 @@ The sensors, the keyboard and lightbar LEDs, the battery charge types and the pl
   `sudo systemctl stop ripple-nova && sudo modprobe -r uniwill_laptop && sudo modprobe uniwill_laptop && sudo systemctl start ripple-nova`.
 - **Update the copy**:
   `git subtree pull --prefix=vendor/uniwill-laptop https://github.com/Wer-Wolf/uniwill-laptop master --squash`.
-- **License**: the driver is GPL-2.0 (`vendor/uniwill-laptop/LICENSE`); the Rust code declares MIT OR Apache-2.0.
+- **License**: the driver is GPL-2.0 (`vendor/uniwill-laptop/LICENSE`); the rest of the project is [MIT or Apache-2.0](#license).
 
 ## Passwordless sudo
 
@@ -232,6 +232,13 @@ Layout: `crates/ripple-core` (register map, protocol, parsers), `crates/ripple-h
 engine, popups), `crates/ripple-cli` (`rcc`), `crates/ripple-gui` (`rcc-gui`), `crates/ripple-tray` (`rcc-tray`),
 `dist/` (service, launcher, sudoers, icon, desktop entries), `vendor/` (patched `xattr` for GPUI, `uniwill-laptop`
 subtree).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+
+Two vendored parts are not covered by that and keep their own licenses: `vendor/uniwill-laptop` (the kernel driver,
+GPL-2.0) and `vendor/xattr` (a patched copy of the `xattr` crate, with its own `LICENSE-MIT` and `LICENSE-APACHE`).
 
 ## Thanks
 
