@@ -4,7 +4,7 @@
 
 use ripple_core::modes::OperatingMode;
 use ripple_core::regs::addr;
-use ripple_hw::control::{self, Config, Hsv, Preset, Profile};
+use ripple_hw::control::{self, Config, FanCurves, Hsv, Preset, Profile};
 use ripple_hw::linux::{self, SysfsEc};
 use ripple_hw::EcAccess;
 
@@ -40,13 +40,19 @@ pub struct Snapshot {
     /// Stock presets (read-only, Office/Gaming/Turbo order) and the user's Custom one.
     pub stock: [Preset; 3],
     pub custom: Preset,
+    /// Fan boost is on (not the custom profile, which shares the EC bit).
     pub boosted: bool,
+    /// The custom fan profile: curves and whether the daemon applies them.
+    pub fan: FanCurves,
     pub auto_boost: Option<u8>,
     pub has_lightbar: bool,
     pub lightbar: Option<(u8, u8, u8)>,
     /// EC-reported RGB keyboard backlight: actual EC levels, and the chosen colour/brightness.
     pub has_keyboard: bool,
     pub keyboard: Option<(u8, u8, u8)>,
+    pub rainbow: bool,
+    /// Backlight level 0..=4 (0 = off).
+    pub kb_level: u8,
     pub hsv: Hsv,
     pub toggles: Vec<(&'static str, bool)>,
     /// Is the hardware mode button being followed, and by the systemd service rather than by us?
@@ -73,11 +79,14 @@ impl Default for Snapshot {
             stock: [p; 3],
             custom: p,
             boosted: false,
+            fan: FanCurves::default(),
             auto_boost: None,
             has_lightbar: false,
             lightbar: None,
             has_keyboard: false,
             keyboard: None,
+            rainbow: false,
+            kb_level: control::KB_BACKLIGHT_MAX,
             hsv: Hsv { h: 180, s: 100, v: 100 },
             toggles: vec![],
             button: false,
@@ -103,6 +112,26 @@ pub struct Hw {
     pub event: String,
 }
 
+/// How a platform toggle is named in the window and in popups.
+pub fn toggle_label(name: &str) -> &str {
+    match name {
+        "fn_lock" => "Fn lock",
+        "super_key_enable" => "Super key",
+        "rainbow_animation" => "Lightbar rainbow",
+        "breathing_in_suspend" => "Lightbar breathing",
+        "ac_auto_boost" => "AC Auto-Boot",
+        "usb_powershare_high" => "USB powershare",
+        other => other,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FanMode {
+    Auto,
+    Custom,
+    Boost,
+}
+
 impl Hw {
     pub fn open() -> Self {
         let (mut ec, ec_error) = match linux::open_auto() {
@@ -112,16 +141,16 @@ impl Hw {
         let model = linux::detect_model(ec.as_deref_mut()).to_string();
         let stock = control::stock(ec.as_deref_mut());
         let cfg = Config::load();
-        // bring the button's mode lights in line with the limits already in force
+        let sysfs = SysfsEc::probe().ok();
+        // find out which profile the EC is running (right after boot only the lights know), write its
+        // limits and put the button's lights on it
         if let Some(ec) = ec.as_deref_mut() {
-            if let Ok(Some(p)) = control::current(ec, &stock, &cfg.custom) {
-                let _ = control::set_mode_byte(ec, p);
-            }
+            let _ = control::adopt(ec, sysfs.as_ref(), &stock, &cfg.custom);
         }
         Self {
             ec,
             ec_error,
-            sysfs: SysfsEc::probe().ok(),
+            sysfs,
             stock,
             cfg,
             model,
@@ -153,15 +182,20 @@ impl Hw {
             ..Default::default()
         };
         let (stock, custom) = (self.stock, self.cfg.custom);
+        // the CLI edits the fan profile too: always start from what is saved
+        self.cfg.fan = Config::load().fan;
+        s.fan = self.cfg.fan.clone();
         if let Some(ec) = self.ec.as_deref_mut() {
             s.profile = control::current(ec, &stock, &custom).ok().flatten();
             s.pl = ec.read(addr::PL1_SETTING).ok().zip(ec.read(addr::PL2_SETTING).ok());
             let fan_byte = ec.read(addr::MAFAN_CONTROL_BYTE).ok();
-            s.boosted = fan_byte.is_some_and(control::is_boosted);
+            s.boosted = fan_byte.is_some_and(control::is_boosted) && !self.cfg.fan.enabled;
             s.has_lightbar = control::has_lightbar(ec);
             s.has_keyboard = control::has_keyboard_rgb(ec);
             if s.has_keyboard {
                 s.keyboard = control::keyboard_rgb(ec).ok();
+                s.rainbow = control::keyboard_rainbow(ec).unwrap_or(false);
+                s.kb_level = control::keyboard_backlight(ec).unwrap_or(control::KB_BACKLIGHT_MAX);
             }
             s.debug = format!(
                 "fan control byte {} · PL1/PL2 regs {}/{} · cTGP reg {}",
@@ -171,8 +205,8 @@ impl Hw {
                 ec.read(1860).map_or("n/a".into(), |v| v.to_string()),
             );
         }
-        // The chosen colour/brightness if we set it; else whatever the EC shows now.
-        s.hsv = self.cfg.keyboard.or_else(|| s.keyboard.map(Hsv::from_levels)).unwrap_or(s.hsv);
+        // The chosen colour/brightness while the EC still shows it; else whatever the EC shows now.
+        s.hsv = control::keyboard_choice(self.cfg.keyboard, s.keyboard).unwrap_or(s.hsv);
         if let Some(u) = &self.sysfs {
             s.ctgp = u.get_attr("ctgp_offset").ok().and_then(|v| v.trim().parse().ok());
             if let Ok(x) = u.sensors() {
@@ -209,7 +243,9 @@ impl Hw {
     pub fn poll(&mut self) -> Snapshot {
         let snap = self.snapshot();
         let hottest = snap.temps.iter().map(|(_, c)| *c).fold(f64::MIN, f64::max);
-        if let Some(on) = control::auto_boost_action(snap.auto_boost, hottest, snap.boosted, self.ours) {
+        // the custom fan profile owns the fans while it is on
+        let policy = if snap.fan.enabled { None } else { snap.auto_boost };
+        if let Some(on) = control::auto_boost_action(policy, hottest, snap.boosted, self.ours) {
             if let Ok(ec) = self.ec() {
                 if control::set_boost(ec, on).is_ok() {
                     self.ours = on;
@@ -267,6 +303,15 @@ impl Hw {
             }
             Field::Ctgp => p.ctgp = value,
         }
+        self.store_custom(p)
+    }
+
+    /// Back to the default custom performance profile preset.
+    pub fn reset_custom(&mut self) -> Result<String, String> {
+        self.store_custom(control::default_custom())
+    }
+
+    fn store_custom(&mut self, p: Preset) -> Result<String, String> {
         p.validate()?;
         if p == self.cfg.custom {
             return Ok("custom preset unchanged".into());
@@ -281,11 +326,53 @@ impl Hw {
         Ok(format!("custom preset: PL1 {} W / PL2 {} W / cTGP +{} W", p.pl1, p.pl2, p.ctgp))
     }
 
-    pub fn set_boost(&mut self, on: bool) -> Result<String, String> {
+    /// Auto (firmware), the custom fan profile (the daemon applies it) or boost.
+    pub fn set_fan_mode(&mut self, mode: FanMode) -> Result<String, String> {
+        self.cfg.fan = Config::load().fan;
+        let was_custom = self.cfg.fan.enabled;
+        self.cfg.fan.enabled = mode == FanMode::Custom;
+        self.cfg.save().map_err(|e| e.to_string())?;
+        self.ours = false; // a manual choice always wins over the auto-boost policy
         let ec = self.ec()?;
-        let (old, new) = control::set_boost(ec, on).map_err(|e| e.to_string())?;
-        self.ours = false; // a manual choice always wins over the policy
-        Ok(if old == new { format!("fan boost already {}", if on { "on" } else { "off" }) } else { format!("fan boost {}", if on { "on" } else { "off" }) })
+        if was_custom && mode != FanMode::Custom {
+            // the daemon's engine hands the fans back within one tick; let it, or it could undo
+            // (or clear) what is set next
+            for _ in 0..15 {
+                if ec.read(addr::MAFAN_CONTROL_BYTE).map_err(|e| e.to_string())? & 0x40 == 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+        // anything still manual (no daemon running) or boosted goes back to the firmware first
+        control::fan_release(ec).map_err(|e| e.to_string())?;
+        Ok(match mode {
+            FanMode::Auto => "fans: firmware auto".into(),
+            FanMode::Custom => "fans: custom profile".into(),
+            FanMode::Boost => {
+                control::set_boost(ec, true).map_err(|e| e.to_string())?;
+                "fans: boost".into()
+            }
+        })
+    }
+
+    /// Set one point of a custom curve (fan 0 = CPU, 1 = GPU); the curve never falls, so the points
+    /// around it move with it.
+    pub fn set_fan_point(&mut self, fan: usize, idx: usize, duty: u8) -> Result<String, String> {
+        self.cfg.fan = Config::load().fan;
+        let c = if fan == 0 { &mut self.cfg.fan.cpu } else { &mut self.cfg.fan.gpu };
+        control::set_curve_point(c, idx, duty);
+        self.cfg.fan.validate()?;
+        self.cfg.save().map_err(|e| e.to_string())?;
+        Ok(format!("{} fan: {duty} % at {} °C", if fan == 0 { "CPU" } else { "GPU" }, control::FAN_ANCHORS[idx]))
+    }
+
+    /// The default preset (on/off is kept).
+    pub fn reset_fan_curves(&mut self) -> Result<String, String> {
+        let enabled = Config::load().fan.enabled;
+        self.cfg.fan = FanCurves { enabled, ..FanCurves::default() };
+        self.cfg.save().map_err(|e| e.to_string())?;
+        Ok("fan curves: default preset".into())
     }
 
     pub fn set_auto_boost(&mut self, t: Option<u8>) -> Result<String, String> {
@@ -297,17 +384,38 @@ impl Hw {
         })
     }
 
-    /// The colour/brightness in effect: the last choice made here, else what the EC shows.
+    /// The colour/brightness in effect: the last choice made here while the EC still shows it, else
+    /// what the EC shows.
     pub fn hsv(&mut self) -> Hsv {
-        if let Some(h) = self.cfg.keyboard {
-            return h;
+        let saved = self.cfg.keyboard;
+        let levels = self.ec().ok().and_then(|ec| control::keyboard_rgb(ec).ok());
+        control::keyboard_choice(saved, levels).unwrap_or(Hsv { h: 180, s: 100, v: 100 })
+    }
+
+    pub fn set_rainbow(&mut self, on: bool) -> Result<String, String> {
+        let was = self.cfg.keyboard_level;
+        let ec = self.ec()?;
+        control::keyboard_on(ec, was).map_err(|e| e.to_string())?;
+        control::set_keyboard_rainbow(ec, on).map_err(|e| e.to_string())?;
+        Ok(if on { "keyboard: rainbow" } else { "keyboard: colour" }.into())
+    }
+
+    /// Backlight off; the level it had is kept to come back to.
+    pub fn set_keyboard_off(&mut self) -> Result<String, String> {
+        let ec = self.ec()?;
+        let level = control::keyboard_off(ec).map_err(|e| e.to_string())?;
+        if level > 0 {
+            self.cfg.keyboard_level = Some(level);
+            self.cfg.save().map_err(|e| e.to_string())?;
         }
-        self.ec().ok().and_then(|ec| control::keyboard_rgb(ec).ok()).map_or(Hsv { h: 180, s: 100, v: 100 }, Hsv::from_levels)
+        Ok("keyboard: off".into())
     }
 
     /// Set the keyboard colour and brightness, and remember the exact choice.
     pub fn set_keyboard(&mut self, hsv: Hsv) -> Result<String, String> {
+        let was = self.cfg.keyboard_level;
         let ec = self.ec()?;
+        control::keyboard_on(ec, was).map_err(|e| e.to_string())?; // picking a colour lights it again
         control::set_keyboard_hsv(ec, hsv).map_err(|e| e.to_string())?;
         self.cfg.keyboard = Some(hsv);
         self.cfg.save().map_err(|e| e.to_string())?;

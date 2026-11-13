@@ -7,12 +7,14 @@
 
 mod autostart;
 mod hw;
+mod notify;
 mod settings;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,7 +23,8 @@ use gpui::{
     Context, Div, ElementId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ResizeEdge, SharedString, Stateful,
     TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
-use hw::{Field, Hw, Snapshot, PROFILES};
+use hw::{toggle_label, FanMode, Field, Hw, Snapshot, PROFILES};
+use ripple_core::modes::OperatingMode;
 use ripple_hw::control::{self, Hsv, Preset, Profile};
 use settings::Settings;
 
@@ -165,8 +168,39 @@ fn step_at(x: f32, left: f32, width: f32, n: usize) -> usize {
     (frac * (n - 1) as f32).round() as usize
 }
 
+/// What outlives the window: the hardware, the latest snapshot and the popup logic. A closed or hidden
+/// window must not stop the popups or the auto-boost policy, so a background thread polls (see `main`)
+/// and the window only reads `latest`.
+struct Shared {
+    hw: Arc<Mutex<Hw>>,
+    snap: Mutex<Snapshot>,
+    /// Turns snapshot differences into desktop popups.
+    notifier: Mutex<notify::Notifier>,
+    /// The "Show popup" setting.
+    popups: AtomicBool,
+}
+
+impl Shared {
+    /// A new snapshot (from the poller or from a click): report what changed since the last one, once,
+    /// whoever caused it, and keep it as the latest.
+    fn publish(&self, snap: Snapshot) {
+        let changes = self.notifier.lock().unwrap_or_else(|e| e.into_inner()).observe(&snap);
+        if self.popups.load(Ordering::Relaxed) {
+            for (title, body) in changes {
+                notify::send(&title, &body);
+            }
+        }
+        *self.snap.lock().unwrap_or_else(|e| e.into_inner()) = snap;
+    }
+
+    fn latest(&self) -> Snapshot {
+        self.snap.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 struct Ui {
     hw: Arc<Mutex<Hw>>,
+    shared: Arc<Shared>,
     snap: Snapshot,
     tab: Tab,
     settings: Settings,
@@ -185,28 +219,28 @@ struct Ui {
 }
 
 impl Ui {
-    fn new(hw: Arc<Mutex<Hw>>, start: Start, cx: &mut Context<Self>) -> Self {
-        let poll = hw.clone();
+    fn new(shared: Arc<Shared>, start: Start, cx: &mut Context<Self>) -> Self {
+        let hw = shared.hw.clone();
+        let latest = shared.clone();
+        // The hardware is polled by a background thread; this only mirrors the latest snapshot. Err =
+        // the view is gone, stop.
         cx.spawn(async move |this, cx| loop {
-            let hw = poll.clone();
-            let snap = cx
-                .background_executor()
-                .spawn(async move { hw.lock().unwrap_or_else(|e| e.into_inner()).poll() })
-                .await;
-            // Err = the view is gone, stop polling.
+            let snap = latest.latest();
             if this.update(cx, |ui, cx| { ui.snap = snap; cx.notify(); }).is_err() {
                 break;
             }
-            cx.background_executor().timer(Duration::from_secs(1)).await;
+            cx.background_executor().timer(Duration::from_millis(500)).await;
         })
         .detach();
         let mut settings = Settings::load();
         settings.light |= start.light;
         let font_scroll = UniformListScrollHandle::new();
         font_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        shared.popups.store(settings.popups, Ordering::Relaxed);
         Self {
             hw,
-            snap: Snapshot::default(),
+            snap: shared.latest(),
+            shared,
             tab: start.tab,
             fonts: settings::installed_fonts(),
             settings,
@@ -241,13 +275,16 @@ impl Ui {
                     hw.snapshot()
                 })
                 .await;
-            this.update(cx, |ui, cx| {
-                ui.snap = snap;
-                cx.notify();
-            })
-            .ok();
+            this.update(cx, |ui, cx| ui.set_snap(snap, cx)).ok();
         })
         .detach();
+    }
+
+    /// The snapshot after a click: shown at once and published (popups) like the poller's.
+    fn set_snap(&mut self, snap: Snapshot, cx: &mut Context<Self>) {
+        self.shared.publish(snap.clone());
+        self.snap = snap;
+        cx.notify();
     }
 
     /// Switch the open-at-login entry; the result (or error) goes to the status bar.
@@ -256,11 +293,24 @@ impl Ui {
         let res = if layout.is_enabled() {
             layout.disable().map(|()| "open at login: off".to_string())
         } else {
-            std::env::current_exe().and_then(|exe| layout.enable(&exe)).map(|()| "open at login: on".to_string())
+            std::env::current_exe().and_then(|exe| layout.enable(&exe, self.settings.start_minimized)).map(|()| "open at login: on".to_string())
         };
         self.hw.lock().unwrap_or_else(|e| e.into_inner()).event = res.unwrap_or_else(|e| format!("error: open at login: {e}"));
         self.autostart = layout.is_enabled();
         cx.notify();
+    }
+
+    /// "Start minimized": saved, and the login script is rewritten when open-at-login is on.
+    fn toggle_start_minimized(&mut self, cx: &mut Context<Self>) {
+        self.settings.start_minimized = !self.settings.start_minimized;
+        let layout = autostart::Layout::system();
+        if layout.is_enabled() {
+            let res = std::env::current_exe().and_then(|exe| layout.enable(&exe, self.settings.start_minimized));
+            if let Err(e) = res {
+                self.hw.lock().unwrap_or_else(|e| e.into_inner()).event = format!("error: open at login: {e}");
+            }
+        }
+        self.save_settings(cx);
     }
 
     /// Persist UI preferences; failures show up in the status bar.
@@ -760,6 +810,13 @@ impl Ui {
                     .child(change(p, "CPU PL1", s.pl.map(|v| v.0), pr.pl1, ""))
                     .child(change(p, "CPU PL2", s.pl.map(|v| v.1), pr.pl2, ""))
                     .child(change(p, "GPU cTGP", s.ctgp, pr.ctgp, "+"));
+                match m {
+                    Profile::Stock(OperatingMode::Turbo) => {
+                        changes = changes.child(note(p, "The stock app's values for this machine. Runs hot under load; the GPU part needs the NVIDIA driver."));
+                    }
+                    Profile::Custom => changes = changes.child(note(p, "Your own preset, edited below.")),
+                    Profile::Stock(_) => {}
+                }
             }
             None => {
                 if let Some((a, b)) = s.pl {
@@ -770,37 +827,58 @@ impl Ui {
 
         // The only editable preset; the stock three are fixed.
         let c = s.custom;
-        let custom = section(p, "Custom preset")
+        let custom = section(p, "Custom performance profile preset")
+            .child(
+                div().flex().gap_2().child(
+                    button(p, "custom-default", "Default preset", false).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.reset_custom()))),
+                ),
+            )
             .child(row(p, "CPU PL1", format!("{} W", c.pl1)))
             .child(self.custom_slider(cx, "custom-pl1", Field::Pl1, c.pl1, 5, control::PL_CEILING_W))
             .child(row(p, "CPU PL2", format!("{} W", c.pl2)))
             .child(self.custom_slider(cx, "custom-pl2", Field::Pl2, c.pl2, 5, control::PL_CEILING_W))
             .child(row(p, "GPU cTGP", format!("+{} W", c.ctgp)))
             .child(self.custom_slider(cx, "custom-ctgp", Field::Ctgp, c.ctgp, 0, control::CTGP_CEILING_W))
-            .child(note(p, "Office, Gaming and Turbo are fixed."));
+            .child(note(p, format!("Balanced, Enthusiast and Overboost are fixed. Edit this one, then pick Custom. Capped at {} W (cTGP {} W).", control::PL_CEILING_W, control::CTGP_CEILING_W)));
 
         let mut page = div().flex().flex_col().gap_3();
         if let Some(e) = &s.ec_error {
             page = page.child(div().p_3().rounded_md().bg(rgb(p.err_bg)).text_color(rgb(p.red)).child(format!("EC unavailable: {e}")));
         }
-        page.child(section(p, "Profile").child(self.profile_dropdown(cx))).child(changes).child(custom).into_any_element()
+        let profile = section(p, "Profile")
+            .child(self.profile_dropdown(cx))
+            .child(note(p, "The mode button cycles Balanced → Enthusiast → Overboost; lights 0 / 1 / 2 (Custom shows 1)."));
+        page.child(profile).child(changes).child(custom).into_any_element()
     }
 
     fn fan_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p();
         let s = &self.snap;
 
-        let mode = section(p, "Fan mode").child(
-            div()
-                .flex()
-                .gap_2()
-                .child(button(p, "fan-auto", "Auto", !s.boosted).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_boost(false)))))
-                .child(button(p, "fan-boost", "Boost", s.boosted).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_boost(true))))),
-        );
+        let current = if s.fan.enabled {
+            FanMode::Custom
+        } else if s.boosted {
+            FanMode::Boost
+        } else {
+            FanMode::Auto
+        };
+        let mode_button = |cx: &mut Context<Self>, id: &'static str, label: &'static str, m: FanMode| {
+            button(p, id, label, current == m).on_click(cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_fan_mode(m))))
+        };
+        let mode = section(p, "Fan mode")
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(mode_button(cx, "fan-auto", "Auto", FanMode::Auto))
+                    .child(mode_button(cx, "fan-custom", "Custom", FanMode::Custom))
+                    .child(mode_button(cx, "fan-boost", "Boost", FanMode::Boost)),
+            )
+            .child(note(p, "Auto: the firmware's own curve. Custom: your curves below, any time. Boost: both fans at full speed."));
 
         let mut fans = section(p, "Sensors");
         if s.temps.is_empty() && s.fans.is_empty() {
-            fans = fans.child(note(p, "no hwmon sensors"));
+            fans = fans.child(note(p, "No hwmon sensors (kernel driver not loaded?)."));
         }
         for (l, c) in &s.temps {
             fans = fans.child(row(p, l.clone(), format!("{c:.1} °C")));
@@ -823,12 +901,47 @@ impl Ui {
         );
         let auto = section(p, "Auto-boost")
             .child(row(p, "Boost above", s.auto_boost.map_or("off".to_string(), |t| format!("{t} °C"))))
-            .child(slider);
+            .child(slider)
+            .child(note(p, "Boost on at the threshold, off 8 °C lower. Runs while this app is open."));
 
-        let limits = section(p, "Manual fan speed and curves: unavailable")
-            .child(note(p, "The fan tables on this laptop are empty, so there is nothing safe to write."));
+        let mut profile = section(p, "Custom fan profile")
+            .child(
+                div().flex().gap_2().child(
+                    button(p, "fan-default", "Default preset", false).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.reset_fan_curves()))),
+                ),
+            )
+            .child(note(
+                p,
+                format!("Duty at each temperature, linear in between. Fan 1 follows the CPU temperature, fan 2 the GPU's; both run at 100 % from {} °C or without a sensor.", control::FAN_PANIC_C),
+            ));
+        if s.fan.enabled && !s.service {
+            profile = profile.child(
+                div().p_3().rounded_md().bg(rgb(p.err_bg)).text_color(rgb(p.red)).child("The curves are applied by the ripple-nova service, which is not running (./install.sh)."),
+            );
+        }
+        let cpu = self.fan_curve(cx, "Fan 1 (CPU) curve", 0, s.fan.cpu);
+        let gpu = self.fan_curve(cx, "Fan 2 (GPU) curve", 1, s.fan.gpu);
 
-        div().flex().flex_col().gap_3().child(mode).child(fans).child(auto).child(limits).into_any_element()
+        div().flex().flex_col().gap_3().child(mode).child(fans).child(profile).child(cpu).child(gpu).child(auto).into_any_element()
+    }
+
+    /// Five duty sliders, one per anchor temperature, for fan 0 (CPU) or 1 (GPU).
+    fn fan_curve(&self, cx: &mut Context<Self>, title: &str, fan: usize, duty: [u8; 5]) -> Div {
+        const IDS: [[&str; 5]; 2] = [
+            ["fan-cpu-0", "fan-cpu-1", "fan-cpu-2", "fan-cpu-3", "fan-cpu-4"],
+            ["fan-gpu-0", "fan-gpu-1", "fan-gpu-2", "fan-gpu-3", "fan-gpu-4"],
+        ];
+        let p = self.p();
+        let mut sec = section(p, title);
+        for (i, d) in duty.into_iter().enumerate() {
+            let labels = if i == 4 { vec![(0, "0".into()), (10, "50".into()), (20, "100".into())] } else { vec![] };
+            sec = sec.child(row(p, format!("{} °C", control::FAN_ANCHORS[i]), format!("{d} %"))).child(self.slider(
+                cx,
+                SliderSpec { id: IDS[fan][i], n: 21, value: usize::from(d) / 5, fill: true, labels, cells: None },
+                move |k| Box::new(move |hw| hw.set_fan_point(fan, i, (k * 5) as u8)),
+            ));
+        }
+        sec
     }
 
     fn keyboard_tab(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -910,10 +1023,22 @@ impl Ui {
             },
         );
 
+        let effect = section(p, "Effect")
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(button(p, "kb-static", "Colour", s.kb_level > 0 && !s.rainbow).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_rainbow(false)))))
+                    .child(button(p, "kb-rainbow", "Rainbow", s.kb_level > 0 && s.rainbow).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_rainbow(true)))))
+                    .child(button(p, "kb-off", "Off", s.kb_level == 0).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_keyboard_off())))),
+            )
+            .child(note(p, "Rainbow is the firmware's own static effect. Off is the backlight level, so the Fn keys bring it back too; picking a colour lights it again."));
+
         div()
             .flex()
             .flex_col()
             .gap_3()
+            .child(effect)
             .child(
                 section(p, "Colour")
                     .child(
@@ -933,29 +1058,48 @@ impl Ui {
                     .child(row(p, "Saturation", format!("{} %", hsv.s)))
                     .child(sat),
             )
-            .child(section(p, "Brightness").child(row(p, "Level", format!("{} %", hsv.v))).child(bright))
+            .child(
+                section(p, "Brightness")
+                    .child(row(p, "Level", format!("{} %", hsv.v)))
+                    .child(bright)
+                    .child(note(p, "No separate brightness register: this dims the colour itself. The Fn brightness keys still work on top.")),
+            )
             .into_any_element()
     }
 
     fn system_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p();
         let s = &self.snap;
-        fn label(name: &str) -> &str {
+        fn describe(name: &str) -> &str {
             match name {
-                "fn_lock" => "Fn lock",
-                "super_key_enable" => "Super key",
-                "rainbow_animation" => "Lightbar rainbow",
-                "breathing_in_suspend" => "Lightbar breathing",
-                other => other,
+                "fn_lock" => "F-keys act as media keys unless Fn is held",
+                "super_key_enable" => "The Super (Windows) key works",
+                "ac_auto_boot" => "Power on when AC is plugged in",
+                "usb_powershare_high" => "Keep the USB ports powered when off",
+                _ => "",
             }
         }
         let mut toggles = section(p, "Toggles");
+        let popups = self.settings.popups;
+        toggles = toggles.child(
+            div()
+                .flex()
+                .justify_between()
+                .items_center()
+                .gap_4()
+                .child(div().child("Show popup").child(note(p, "Notify when a toggle, the performance profile or fan boost changes.")))
+                .child(button(p, "popup-toggle", if popups { "On" } else { "Off" }, popups).on_click(cx.listener(|ui, _, _, cx| {
+                    ui.settings.popups = !ui.settings.popups;
+                    ui.shared.popups.store(ui.settings.popups, Ordering::Relaxed);
+                    ui.save_settings(cx);
+                }))),
+        );
         if s.toggles.is_empty() {
             toggles = toggles.child(note(p, "none"));
         }
         for (i, (name, on)) in s.toggles.iter().copied().enumerate() {
             toggles = toggles.child(
-                div().flex().justify_between().items_center().gap_4().child(label(name)).child(
+                div().flex().justify_between().items_center().gap_4().child(div().child(toggle_label(name)).child(note(p, describe(name)))).child(
                     button(p, ("toggle", i), if on { "On" } else { "Off" }, on)
                         .on_click(cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on)))),
                 ),
@@ -983,7 +1127,7 @@ impl Ui {
                     .child(button(p, "lb-off", "Off", false).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.set_lightbar(None))))),
             );
         } else {
-            page = page.child(note(p, "No lightbar on this laptop."));
+            page = page.child(note(p, "No lightbar on this laptop (the EC reports none), so its controls are hidden."));
         }
         page.into_any_element()
     }
@@ -1105,7 +1249,8 @@ impl Ui {
 
         let font = section(p, "Font")
             .child(self.font_dropdown(cx))
-            .child(div().font_family(self.family()).child("The quick brown fox 0123456789"));
+            .child(div().font_family(self.family()).child("The quick brown fox 0123456789"))
+            .child(note(p, format!("{} families. Default: the system monospace font.", self.fonts.len())));
 
         let startup = section(p, "Startup")
             .child(
@@ -1116,7 +1261,15 @@ impl Ui {
                     .child(button(p, "autostart", if self.autostart { "On" } else { "Off" }, self.autostart).on_click(cx.listener(|ui, _, _, cx| ui.toggle_autostart(cx))))
                     .child("Open at login"),
             )
-            .child(note(p, "Starts minimized and asks for your password."));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(button(p, "start-min", if self.settings.start_minimized { "On" } else { "Off" }, self.settings.start_minimized).on_click(cx.listener(|ui, _, _, cx| ui.toggle_start_minimized(cx))))
+                    .child("Start minimized"),
+            )
+            .child(note(p, "Open at login starts the window at login (no password: the sudoers rule from install.sh, else polkit asks). Start minimized keeps it out of the way until you open it."));
 
         div().flex().flex_col().gap_3().child(theme).child(font).child(startup).into_any_element()
     }
@@ -1165,6 +1318,19 @@ impl Render for Ui {
 
 // ------------------------------------------------------------------ startup
 
+/// Held for as long as the app runs; `/run/ripple-nova-gui.lock` is also what the launcher looks at.
+/// `Err` = another instance holds it. A lock file that cannot even be opened (not root: the smoke
+/// tests) does not stop anything.
+fn single_instance() -> Result<Option<std::fs::File>, ()> {
+    let Ok(f) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(ripple_hw::notify::GUI_LOCK) else {
+        return Ok(None);
+    };
+    match f.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => Err(()),
+        _ => Ok(Some(f)),
+    }
+}
+
 /// Follow the hardware mode button (WMI event 176 = key 184): each press cycles the profile,
 /// exactly what the stock Windows service does. Only one process may follow it: when the systemd
 /// service already holds the lock, the app leaves the button to it.
@@ -1201,7 +1367,7 @@ fn main() {
     if let Some(cmd) = args.iter().position(|a| a == "--autostart").and_then(|i| args.get(i + 1)) {
         let layout = autostart::Layout::system();
         let res = match cmd.as_str() {
-            "on" => std::env::current_exe().and_then(|exe| layout.enable(&exe)),
+            "on" => std::env::current_exe().and_then(|exe| layout.enable(&exe, Settings::load().start_minimized)),
             "off" => layout.disable(),
             "status" => Ok(()),
             other => {
@@ -1218,8 +1384,30 @@ fn main() {
         }
         return;
     }
+    // One window per machine: a second root GUI would follow the button twice and double every popup.
+    // (The launcher checks this lock too, before it asks for anything.)
+    let _instance = match single_instance() {
+        Ok(lock) => lock,
+        Err(()) => {
+            eprintln!("Ripple Control Center is already running");
+            return;
+        }
+    };
     let hw = Arc::new(Mutex::new(Hw::open()));
     spawn_mode_button(hw.clone());
+    let shared = Arc::new(Shared {
+        hw: hw.clone(),
+        snap: Mutex::new(Snapshot::default()),
+        notifier: Mutex::new(notify::Notifier::default()),
+        popups: AtomicBool::new(Settings::load().popups),
+    });
+    // The poller (also runs the auto-boost policy) lives as long as the process, window or not.
+    let poller = shared.clone();
+    std::thread::spawn(move || loop {
+        let snap = poller.hw.lock().unwrap_or_else(|e| e.into_inner()).poll();
+        poller.publish(snap);
+        std::thread::sleep(Duration::from_secs(1));
+    });
     let start = Start::from_args();
     let minimized = start.minimized;
     Application::new().run(move |cx: &mut App| {
@@ -1248,7 +1436,7 @@ fn main() {
                 if minimized {
                     window.minimize_window();
                 }
-                cx.new(|cx| Ui::new(hw, start, cx))
+                cx.new(|cx| Ui::new(shared, start, cx))
             },
         )
         .unwrap();

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 const PATH: &str = "/etc/ripple-nova/gui.json";
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// Light theme instead of the default dark one.
     #[serde(default)]
@@ -15,6 +15,23 @@ pub struct Settings {
     /// Font family; `None` = the system monospace font.
     #[serde(default)]
     pub font: Option<String>,
+    /// Desktop popups when a toggle, the profile or fan boost changes. On unless switched off:
+    /// a missing key (an old file) must read as on, not as serde's `false`.
+    #[serde(default = "yes")]
+    pub popups: bool,
+    /// Open at login without showing the window (it starts minimized). On unless switched off.
+    #[serde(default = "yes")]
+    pub start_minimized: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { light: false, font: None, popups: true, start_minimized: true }
+    }
 }
 
 impl Settings {
@@ -61,11 +78,16 @@ mod tests {
     #[test]
     fn defaults_are_dark_system_font_and_roundtrip() {
         let d = Settings::default();
-        assert!(!d.light && d.font.is_none());
-        let s = Settings { light: true, font: Some("Fira Code".into()) };
+        assert!(!d.light && d.font.is_none() && d.popups && d.start_minimized);
+        let s = Settings { light: true, font: Some("Fira Code".into()), popups: false, start_minimized: false };
         assert_eq!(serde_json::from_str::<Settings>(&serde_json::to_string(&s).unwrap()).unwrap(), s);
         // old/partial files (even with the removed all_fonts key) still load
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), d);
         assert_eq!(serde_json::from_str::<Settings>(r#"{"all_fonts":true}"#).unwrap(), d);
+        // a file written before the option existed keeps popups on
+        assert!(serde_json::from_str::<Settings>(r#"{"light":true,"font":null}"#).unwrap().popups);
+        assert!(!serde_json::from_str::<Settings>(r#"{"popups":false}"#).unwrap().popups);
+        assert!(serde_json::from_str::<Settings>("{}").unwrap().start_minimized);
+        assert!(!serde_json::from_str::<Settings>(r#"{"start_minimized":false}"#).unwrap().start_minimized);
     }
 }
