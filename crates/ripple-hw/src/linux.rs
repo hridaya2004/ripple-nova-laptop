@@ -70,13 +70,42 @@ fn ec_lock() -> Option<std::fs::File> {
 
 /// Write `method arg...` to `/proc/acpi/call` and parse the result.
 fn acpi_call_raw(method: &str, args: &[u64]) -> HwResult<u64> {
-    use std::io::Write;
-    let _lock = ec_lock();
-
     let mut payload = String::from(method);
     for a in args {
         payload.push_str(&format!(" 0x{a:X}"));
     }
+    acpi_call_payload(method, &payload)
+}
+
+/// `GetSetULong` through `WMBC`: instance 0, method 4, an 8-byte *buffer* argument (`b<hex>` for
+/// acpi_call; an integer works for reads here but a buffer is what the driver itself sends)
+/// `addr:u16 data:u16 op:u16 0:u16`, op 0x0100 = read, 0 = write. Result byte 0 is the register value.
+fn wmbc_call(wmbc: &str, addr: u16, data: u8, read: bool) -> HwResult<u8> {
+    let op: u16 = if read { 0x0100 } else { 0 };
+    let mut buf = [0u8; 8];
+    buf[0..2].copy_from_slice(&addr.to_le_bytes());
+    buf[2..4].copy_from_slice(&u16::from(data).to_le_bytes());
+    buf[4..6].copy_from_slice(&op.to_le_bytes());
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    let v = acpi_call_payload(wmbc, &format!("{wmbc} 0x0 0x4 b{hex}"))?;
+    if (v as u32) == protocol::EC_FAIL {
+        return Err(HwError::EcFail { addr });
+    }
+    Ok(v as u8)
+}
+
+/// The fan duty registers behind `WMBC` (fan 1 = CPU, fan 2 = GPU), measured on this machine.
+fn fan_duty_addr(fan: u8) -> HwResult<u16> {
+    match fan {
+        1 => Ok(0x1804),
+        2 => Ok(0x1809),
+        n => Err(HwError::Other(format!("fan {n}: this EC has fans 1 (CPU) and 2 (GPU)"))),
+    }
+}
+
+fn acpi_call_payload(method: &str, payload: &str) -> HwResult<u64> {
+    use std::io::Write;
+    let _lock = ec_lock();
 
     let mut f = std::fs::OpenOptions::new()
         .write(true)
@@ -91,9 +120,14 @@ fn acpi_call_raw(method: &str, args: &[u64]) -> HwResult<u64> {
     f.write_all(payload.as_bytes())?;
     drop(f);
 
-    let out = std::fs::read_to_string("/proc/acpi/call")
+    // One read with a big buffer: acpi_call hands back nothing when the caller's buffer is smaller
+    // than the result, and `read_to_string` starts with a 32-byte probe. Short integer results fit
+    // anyway; a WMBC buffer result (40 bytes, ~250 characters) does not.
+    let mut buf = vec![0u8; 8192];
+    let n = std::fs::File::open("/proc/acpi/call")
+        .and_then(|mut f| std::io::Read::read(&mut f, &mut buf))
         .map_err(|e| HwError::Other(format!("read result: {e}")))?;
-    parse_acpi_result(method, &out)
+    parse_acpi_result(method, &String::from_utf8_lossy(&buf[..n]))
 }
 
 /// acpi_call outputs: `0x1234` (NUL-terminated!), `1234`,
@@ -213,26 +247,36 @@ fn trim_acpi_name(p: &str) -> String {
 /// "method not found". Returns the working device path.
 fn discover_method(candidates: &[String], method: &str, args: &[u64]) -> HwResult<String> {
     let mut tried: Vec<String> = Vec::new();
+    // `\_SB_.X` and `\_SB.X` are two spellings of one device: report (and count) it once
+    let mut note = |path: &str, why: String| {
+        let line = format!("{}: {why}", path.replace("_SB_", "_SB"));
+        if !tried.contains(&line) {
+            tried.push(line);
+        }
+    };
     for c in candidates {
         let full = format!("{c}.{method}");
         match acpi_call_raw(&full, args) {
             // Method exists (an EC failure still proves the path resolves).
             Ok(_) | Err(HwError::EcFail { .. }) => return Ok(c.clone()),
             Err(e @ HwError::Permission(_)) => return Err(e),
-            Err(e @ HwError::Unavailable(_)) => {
-                tried.push(format!("{full} ({e})"));
-            }
-            Err(e) => {
-                // Any other ACPI error: not a usable method, keep looking.
-                tried.push(format!("{full} ({e})"));
-            }
+            // Any other ACPI error: not a usable method, keep looking.
+            Err(e) => note(c, short_reason(&e)),
         }
     }
-    Err(HwError::Unavailable(format!(
-        "no usable {method} method; tried {} path(s): {}",
-        tried.len(),
-        tried.join(", ")
-    )))
+    Err(HwError::Unavailable(format!("no usable {method} method ({})", tried.join("; "))))
+}
+
+/// A few words for why a probe failed (the full text of an ACPI error is not for a one-line summary).
+fn short_reason(e: &HwError) -> String {
+    let m = e.to_string();
+    if m.contains("AE_NOT_FOUND") {
+        "not found".into()
+    } else if m.contains("empty readback") {
+        "empty readback".into()
+    } else {
+        m.chars().take(60).collect()
+    }
 }
 
 fn acpi_available() -> HwResult<()> {
@@ -254,6 +298,8 @@ pub struct AcpiCallEc {
     device: String,
     /// Pacing (6 ms per OEM).
     pace: bool,
+    /// `WMBC` path, found on first use (only the fan duty registers need it).
+    wmbc: Option<String>,
 }
 
 impl AcpiCallEc {
@@ -284,12 +330,30 @@ impl AcpiCallEc {
         Ok(Self {
             device,
             pace: true,
+            wmbc: None,
         })
     }
 
     /// Discovered device path (shown by `rcc doctor`).
     pub fn device(&self) -> &str {
         &self.device
+    }
+
+    fn wmbc_path(&mut self) -> HwResult<String> {
+        if let Some(p) = &self.wmbc {
+            return Ok(p.clone());
+        }
+        let mut candidates: Vec<String> = Vec::new();
+        for p in acpi_sysfs_paths("PNP0C14") {
+            push_unique(&mut candidates, p);
+        }
+        for p in [r"\_SB.AMW0", r"\_SB_.AMW0"] {
+            push_unique(&mut candidates, p.into());
+        }
+        let dev = discover_method(&candidates, "WMBC", &[0, 4, protocol::encode_read(PROBE_ADDR as u16)])?;
+        let path = format!("{dev}.WMBC");
+        self.wmbc = Some(path.clone());
+        Ok(path)
     }
 }
 
@@ -325,6 +389,23 @@ impl EcAccess for AcpiCallEc {
         if self.pace {
             std::thread::sleep(crate::EC_PACE);
         }
+        Ok(())
+    }
+
+    fn fan_duty(&mut self, fan: u8) -> HwResult<u8> {
+        let (addr, wmbc) = (fan_duty_addr(fan)?, self.wmbc_path()?);
+        let v = wmbc_call(&wmbc, addr, 0, true)?;
+        std::thread::sleep(crate::EC_PACE);
+        Ok(v)
+    }
+
+    fn set_fan_duty(&mut self, fan: u8, duty: u8) -> HwResult<()> {
+        if duty > 200 {
+            return Err(HwError::Other(format!("fan duty is 0..=200 (got {duty})")));
+        }
+        let (addr, wmbc) = (fan_duty_addr(fan)?, self.wmbc_path()?);
+        wmbc_call(&wmbc, addr, duty, false)?;
+        std::thread::sleep(crate::EC_PACE);
         Ok(())
     }
 }
@@ -461,6 +542,16 @@ pub const PLATFORM_ATTRS: &[&str] = &[
     "usb_powershare_high",
 ];
 
+/// The kernel calls the fans "Main"/"Secondary"; the Windows app names them by what they cool:
+/// fan 1 = CPU, fan 2 = GPU.
+fn fan_label(idx: u32) -> String {
+    match idx {
+        1 => "Fan 1 (CPU)".into(),
+        2 => "Fan 2 (GPU)".into(),
+        n => format!("Fan {n}"),
+    }
+}
+
 fn write_sysfs(path: &std::path::Path, value: &str) -> HwResult<()> {
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
@@ -580,7 +671,7 @@ impl SysfsEc {
                 }
             } else if let Some(idx) = name.strip_prefix("fan").and_then(|r| r.strip_suffix("_input")).and_then(|i| i.parse::<u32>().ok()) {
                 if let Some(rpm) = read(&e.path()) {
-                    fans.push((idx, label("fan", idx), rpm as u32));
+                    fans.push((idx, fan_label(idx), rpm as u32));
                 }
             } else if let Some(idx) = name.strip_prefix("pwm").and_then(|i| i.parse::<u32>().ok()) {
                 if let Some(v) = read(&e.path()) {
