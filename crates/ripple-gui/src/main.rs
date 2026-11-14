@@ -1622,23 +1622,27 @@ impl Ui {
             )
             .child(note(p, "Auto: the firmware's own curve. Custom: your curves for the running profile below, any time. Boost: both fans at full speed."));
 
-        let mut fans = section(p, "Sensors");
-        if s.temps.is_empty() && s.fans.is_empty() {
-            fans = fans.child(note(p, "No hwmon sensors (kernel driver not loaded?)."));
-        }
-        for (l, c) in &s.temps {
-            fans = fans.child(row(p, l.clone(), format!("{c:.1} °C")));
-        }
-        for (l, rpm, duty) in &s.fans {
-            fans = fans.child(row(
+        // temperatures left, fans right: both are what you look at while changing the mode below
+        let column = || div().flex().flex_col().flex_1().gap_1();
+        let temps = s.temps.iter().fold(column(), |c, (l, t)| {
+            c.child(row(p, l.clone(), format!("{t:.1} °C")))
+        });
+        let rpms = s.fans.iter().fold(column(), |c, (l, rpm, duty)| {
+            c.child(row(
                 p,
                 l.clone(),
                 format!(
                     "{rpm} rpm{}",
                     duty.map(|d| format!("  ({d} %)")).unwrap_or_default()
                 ),
-            ));
-        }
+            ))
+        });
+        let mut fans = section(p, "Sensors");
+        fans = if s.temps.is_empty() && s.fans.is_empty() {
+            fans.child(note(p, "No hwmon sensors (kernel driver not loaded?)."))
+        } else {
+            fans.child(div().flex().gap_6().child(temps).child(rpms))
+        };
 
         // Off, then 60..=95 °C in 5 °C steps.
         let steps: Vec<Option<u8>> = std::iter::once(None)
@@ -1724,11 +1728,11 @@ impl Ui {
             .flex_col()
             .gap_3()
             .child(mode)
+            .child(fans)
             .child(profile)
             .child(cpu)
             .child(gpu)
             .child(auto)
-            .child(fans)
             .into_any_element()
     }
 
