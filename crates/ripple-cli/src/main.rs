@@ -123,6 +123,14 @@ pub enum Command {
         #[arg(value_enum)]
         state: Option<OnOff>,
     },
+    /// NVIDIA GPU: state, and the core / memory clock offsets (needs the NVIDIA driver)
+    ///
+    /// `rcc gpu` shows the GPU; `rcc gpu set --core 50 --mem 200` saves offsets in MHz; `rcc gpu on` applies
+    /// them (the service puts them back after a driver reload) and `rcc gpu off` returns the GPU to its own clocks.
+    Gpu {
+        #[command(subcommand)]
+        cmd: Option<GpuCmd>,
+    },
     /// Kernel platform toggles (fn-lock, super key, touchpad, USB-C priority, cTGP)
     ///
     /// `rcc system` alone lists every attribute with its current value.
@@ -360,6 +368,23 @@ pub enum ProfileChoice {
     Trickle,
     /// charge_types: longevity profile
     LongLife,
+}
+
+#[derive(Subcommand)]
+pub enum GpuCmd {
+    /// Show the GPU, its power limit and the offsets (the default)
+    Show,
+    /// Save the offsets in MHz (core -200..=200, memory -500..=1000); applied only while `on`
+    Set {
+        #[arg(long, allow_negative_numbers = true)]
+        core: Option<i32>,
+        #[arg(long, allow_negative_numbers = true)]
+        mem: Option<i32>,
+    },
+    /// Apply the saved offsets
+    On,
+    /// Back to the GPU's own clocks
+    Off,
 }
 
 #[derive(Subcommand)]

@@ -160,3 +160,36 @@ pub fn wait_mode_key(dev: &mut std::fs::File) -> HwResult<()> {
         }
     }
 }
+
+/// The daemon's GPU loop (NVIDIA driver only): every five seconds, make the GPU's clock offsets match the
+/// saved choice. They are lost when the driver reloads, so they are put back here. Switching them off sets
+/// zeros once; a GPU nobody here tuned is left alone, so another tool's offsets are not fought.
+pub fn gpu_loop(stop: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut gpu: Option<crate::gpu::Gpu> = None;
+    let mut applied = false; // did we set offsets (so that "off" has to put zeros back)
+    let mut said = String::new(); // the last complaint, so a standing problem is logged once
+    let mut complain = |msg: String| {
+        if msg != said {
+            eprintln!("gpu: {msg}");
+            said = msg;
+        }
+    };
+    while !stop.load(Relaxed) {
+        if crate::gpu::driver_present() {
+            if gpu.is_none() {
+                gpu = crate::gpu::Gpu::open()
+                    .map_err(|e| complain(e.to_string()))
+                    .ok();
+            }
+            let tune = Config::load().gpu;
+            if let Some(g) = gpu.as_ref().filter(|_| tune.enabled || applied) {
+                match g.apply(&tune) {
+                    Ok(_) => applied = tune.enabled,
+                    Err(e) => complain(e.to_string()),
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+}

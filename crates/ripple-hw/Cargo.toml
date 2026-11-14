@@ -11,3 +11,5 @@ ripple-core = { path = "../ripple-core" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# dlopen for NVML (libnvidia-ml), which only exists with the NVIDIA driver
+libc = "0.2"

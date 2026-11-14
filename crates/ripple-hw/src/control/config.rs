@@ -30,6 +30,9 @@ pub struct Config {
     /// The touchpad is powered (its LED off). Off = the driver is unbound, see `touchpad.rs`.
     #[serde(default = "yes")]
     pub touchpad_on: bool,
+    /// NVIDIA GPU clock offsets (only used while the NVIDIA driver is there).
+    #[serde(default)]
+    pub gpu: crate::gpu::GpuTune,
 }
 
 fn yes() -> bool {
@@ -59,6 +62,7 @@ impl Config {
             fan_sets: BTreeMap::new(),
             keyboard_level: None,
             touchpad_on: true,
+            gpu: crate::gpu::GpuTune::default(),
         }
     }
 
@@ -88,6 +92,9 @@ impl Config {
         }
         self.profiles.retain(|c| c.preset.validate().is_ok());
         self.fan_sets.retain(|_, set| set.validate().is_ok());
+        if self.gpu.validate().is_err() {
+            self.gpu = crate::gpu::GpuTune::default();
+        }
     }
 
     /// The key a profile's own settings are saved under: the stock mode's name, or the profile's name.

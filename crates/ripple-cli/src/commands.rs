@@ -10,8 +10,8 @@ use ripple_hw::control::{self, Config, Hsv, Preset, Profile};
 use ripple_hw::{EcAccess, HwError, HwResult};
 
 use crate::{
-    Backend, BatteryCmd, Cli, CurveCmd, CustomFanCmd, EcCmd, FanCmd, ModeChoice, ModeCmd, PowerCmd,
-    ProfileChoice, RgbCmd, SystemCmd,
+    Backend, BatteryCmd, Cli, CurveCmd, CustomFanCmd, EcCmd, FanCmd, GpuCmd, ModeChoice, ModeCmd,
+    PowerCmd, ProfileChoice, RgbCmd, SystemCmd,
 };
 
 pub type CmdResult = Result<(), String>;
@@ -30,6 +30,7 @@ pub fn run(cli: &Cli) -> CmdResult {
         crate::Command::System { cmd } => system(cli, cmd),
         crate::Command::Touchpad { state } => touchpad(*state),
         crate::Command::Popups { state } => popups(*state),
+        crate::Command::Gpu { cmd } => gpu(cmd.as_ref().unwrap_or(&crate::GpuCmd::Show)),
         crate::Command::Ec { cmd } => ec_cmd(cli, cmd),
     }
 }
@@ -837,6 +838,8 @@ fn watch(cli: &Cli) -> CmdResult {
     std::thread::spawn(|| control::popup_loop(&NEVER));
     // keeps the touchpad on or off as the user chose (an "off" does not survive a reboot by itself)
     std::thread::spawn(|| control::touchpad_loop(&NEVER));
+    // puts the NVIDIA GPU's clock offsets back after a driver reload (does nothing without the driver)
+    std::thread::spawn(|| control::gpu_loop(&NEVER));
     let retry = std::time::Duration::from_secs(10);
     let mut key = open_waiting(control::open_mode_key, retry);
     let _lock = match control::follow_lock(false) {
@@ -994,6 +997,70 @@ fn touchpad(choice: crate::TouchpadChoice) -> CmdResult {
         } else {
             "off (powered down, LED on)"
         }
+    );
+    Ok(())
+}
+
+/// `rcc gpu`: the NVIDIA GPU's state and clock offsets.
+fn gpu(cmd: &GpuCmd) -> CmdResult {
+    let g = ripple_hw::gpu::Gpu::open().map_err(|e| {
+        format!("{e}: the GPU settings need the NVIDIA driver (README, \"The NVIDIA driver\")")
+    })?;
+    let save =
+        |f: &dyn Fn(&mut ripple_hw::gpu::GpuTune)| -> Result<ripple_hw::gpu::GpuTune, String> {
+            Ok(Config::update(|c| {
+                let mut t = c.gpu;
+                f(&mut t);
+                t.validate()?;
+                c.gpu = t;
+                Ok(t)
+            })?)
+        };
+    match cmd {
+        GpuCmd::Show => {}
+        GpuCmd::Set { core, mem } => {
+            let t = save(&|t| {
+                t.core_mhz = core.unwrap_or(t.core_mhz);
+                t.mem_mhz = mem.unwrap_or(t.mem_mhz);
+            })?;
+            if t.enabled {
+                g.apply(&t)?;
+            } else {
+                println!("saved; `rcc gpu on` applies it");
+            }
+        }
+        GpuCmd::On | GpuCmd::Off => {
+            let on = matches!(cmd, GpuCmd::On);
+            let t = save(&|t| t.enabled = on)?;
+            g.apply(&t)?;
+        }
+    }
+    let (s, t) = (g.status(), Config::load().gpu);
+    let w = |v: Option<f64>| v.map_or("n/a".to_string(), |v| format!("{v:.0} W"));
+    println!("{}", s.name);
+    println!(
+        "  power         : {} now, limit {} (default {}, at most {})",
+        w(s.power_w),
+        w(s.limit_w),
+        w(s.default_limit_w),
+        w(s.max_limit_w)
+    );
+    println!(
+        "  clocks        : core {} MHz, memory {} MHz, {} °C, P{}",
+        s.core_mhz.map_or("n/a".into(), |v| v.to_string()),
+        s.mem_mhz.map_or("n/a".into(), |v| v.to_string()),
+        s.temp_c.map_or("n/a".into(), |v| v.to_string()),
+        s.pstate.map_or("?".into(), |v| v.to_string())
+    );
+    println!(
+        "  offsets now   : core {:+} MHz, memory {:+} MHz",
+        s.core_offset, s.mem_offset
+    );
+    println!(
+        "  offsets saved : core {:+} MHz, memory {:+} MHz, {}",
+        t.core_mhz,
+        t.mem_mhz,
+        if t.enabled { "on" } else { "off" }
     );
     Ok(())
 }

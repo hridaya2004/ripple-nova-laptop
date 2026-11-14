@@ -4524,6 +4524,7 @@ dependencies = [
 name = "ripple-hw"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "ripple-core",
  "serde",
  "serde_json",
