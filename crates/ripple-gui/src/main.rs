@@ -1644,8 +1644,12 @@ impl Ui {
             match name {
                 "fn_lock" => "F-keys act as media keys unless Fn is held",
                 "super_key_enable" => "The Super (Windows) key works",
-                "ac_auto_boot" => "Power on when AC is plugged in",
-                "usb_powershare_high" => "Keep the USB ports powered when off",
+                "ac_auto_boot" => {
+                    "Power on when AC is plugged in (enabling it turns USB powershare off)"
+                }
+                "usb_powershare_high" => {
+                    "Keep the USB ports powered when off (enabling it turns AC auto-boot off)"
+                }
                 "touchpad" => {
                     "Off powers the touchpad down: no pointer, its LED lights (as in suspend)"
                 }
