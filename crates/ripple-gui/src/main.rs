@@ -6,6 +6,7 @@
 //! never blocks.
 
 mod autostart;
+mod chart;
 mod drag;
 mod hw;
 mod input;
@@ -19,10 +20,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
-    canvas, deferred, div, img, prelude::*, px, relative, rgb, size, AnyElement, App, Application,
-    Bounds, Context, Div, ElementId, FocusHandle, Image, ImageFormat, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, ResizeEdge, SharedString, Stateful, TitlebarOptions,
-    Window, WindowBounds, WindowDecorations, WindowOptions,
+    canvas, deferred, div, fill, img, point, prelude::*, px, quad, relative, rgb, rgba, size,
+    AnyElement, App, Application, BorderStyle, Bounds, Context, Corners, Div, Edges, ElementId,
+    FocusHandle, Image, ImageFormat, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    PathBuilder, Pixels, ResizeEdge, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
+    WindowDecorations, WindowOptions,
 };
 use hw::{FanMode, Field, Hw, Snapshot, PROFILES};
 use input::{Outcome, TextInput};
@@ -165,6 +167,11 @@ struct SliderReg {
     n: usize,
     value: usize,
     pick: Pick,
+    /// A vertical track (the fan chart's dots): the top is the highest position, and the pointer's
+    /// height is what counts.
+    vertical: bool,
+    /// Lowest position the pointer can pick (the last fan point has a floor).
+    lo: usize,
 }
 
 struct SliderSpec {
@@ -188,6 +195,29 @@ fn step_at(x: f32, left: f32, width: f32, n: usize) -> usize {
     let frac = ((x - left) / width).clamp(0.0, 1.0);
     (frac * (n - 1) as f32).round() as usize
 }
+
+/// `step_at` for a vertical track spanning `top..top + height`: the top is the last position.
+fn step_at_y(y: f32, top: f32, height: f32, n: usize) -> usize {
+    step_at(top + height - y, 0.0, height, n)
+}
+
+/// The slider ids of each fan's five curve dots, CPU fan then GPU fan.
+const FAN_IDS: [[&str; 5]; 2] = [
+    [
+        "fan-cpu-0",
+        "fan-cpu-1",
+        "fan-cpu-2",
+        "fan-cpu-3",
+        "fan-cpu-4",
+    ],
+    [
+        "fan-gpu-0",
+        "fan-gpu-1",
+        "fan-gpu-2",
+        "fan-gpu-3",
+        "fan-gpu-4",
+    ],
+];
 
 /// The hardware and the latest snapshot. A background thread polls (this also runs the auto-boost policy)
 /// and the window only reads `latest`.
@@ -559,30 +589,42 @@ impl Ui {
 
     // ---- slider pointer handling
 
-    fn step_for(&self, id: &'static str, x: f32) -> Option<(usize, usize, Pick)> {
+    /// `(position, hardware value, job builder)` for a pointer at `(x, y)` over slider `id`.
+    fn step_for(&self, id: &'static str, (x, y): (f32, f32)) -> Option<(usize, usize, Pick)> {
         let reg = self.sliders.borrow();
         let r = reg.get(id)?;
         let b = r.bounds?;
-        Some((
-            step_at(x, f32::from(b.origin.x), f32::from(b.size.width), r.n),
-            r.value,
-            r.pick.clone(),
-        ))
+        let step = if r.vertical {
+            step_at_y(y, f32::from(b.origin.y), f32::from(b.size.height), r.n)
+        } else {
+            step_at(x, f32::from(b.origin.x), f32::from(b.size.width), r.n)
+        };
+        Some((step.max(r.lo), r.value, r.pick.clone()))
     }
 
-    fn slider_press(&mut self, id: &'static str, x: f32, cx: &mut Context<Self>) {
-        if let Some((i, value, _)) = self.step_for(id, x) {
+    fn slider_press(&mut self, id: &'static str, at: (f32, f32), cx: &mut Context<Self>) {
+        if let Some((i, value, _)) = self.step_for(id, at) {
             let generation = self.slider.press(id, value, i);
             self.slider_timer(generation, cx);
             cx.notify();
         }
     }
 
-    fn slider_drag(&mut self, x: f32, cx: &mut Context<Self>) {
+    /// A press on a fan chart picks the dot whose column is nearest and drags it from there.
+    fn chart_press(&mut self, fan: usize, at: (f32, f32), cx: &mut Context<Self>) {
+        let ids = FAN_IDS[fan];
+        let Some(b) = self.sliders.borrow().get(ids[0]).and_then(|r| r.bounds) else {
+            return;
+        };
+        let frac = (at.0 - f32::from(b.origin.x)) / f32::from(b.size.width);
+        self.slider_press(ids[chart::nearest_anchor(frac)], at, cx);
+    }
+
+    fn slider_drag(&mut self, at: (f32, f32), cx: &mut Context<Self>) {
         let Some((id, last)) = self.slider.thumb.filter(|_| self.slider.down) else {
             return;
         };
-        if let Some((i, _, _)) = self.step_for(id, x) {
+        if let Some((i, _, _)) = self.step_for(id, at) {
             if i != last {
                 let generation = self.slider.moved(id, i);
                 self.slider_timer(generation, cx);
@@ -640,6 +682,8 @@ impl Ui {
                 n,
                 value: spec.value,
                 pick: Rc::new(pick),
+                vertical: false,
+                lo: 0,
             },
         );
 
@@ -761,7 +805,7 @@ impl Ui {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |ui, e: &MouseDownEvent, _, cx| {
-                    ui.slider_press(id, f32::from(e.position.x), cx)
+                    ui.slider_press(id, (f32::from(e.position.x), f32::from(e.position.y)), cx)
                 }),
             )
             .child(inner)
@@ -813,6 +857,70 @@ fn switch(p: Palette, id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
                 .rounded_full()
                 .bg(rgb(if on { p.accent } else { p.muted })),
         )
+}
+
+/// Paint one fan curve into `b`: grid, the area under the curve, the line and the five dots (the one
+/// being dragged, if any, bigger).
+fn paint_chart(
+    window: &mut Window,
+    b: Bounds<Pixels>,
+    p: Palette,
+    shown: &[u8; 5],
+    active: Option<usize>,
+) {
+    let (x0, y0) = (f32::from(b.origin.x), f32::from(b.origin.y));
+    let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+    let at = |temp: f32, duty: f32| {
+        point(
+            px(x0 + chart::frac_x(temp) * w),
+            px(y0 + (1. - duty / 100.) * h),
+        )
+    };
+    for k in 0..=10 {
+        let y = y0 + h * (1. - k as f32 / 10.);
+        window.paint_quad(fill(
+            Bounds::new(point(px(x0), px(y - 0.5)), size(px(w), px(1.))),
+            rgb(p.border),
+        ));
+    }
+    for t in (30..=100).step_by(10) {
+        let x = x0 + chart::frac_x(t as f32) * w;
+        window.paint_quad(fill(
+            Bounds::new(point(px(x - 0.5), px(y0)), size(px(1.), px(h))),
+            rgb(p.border),
+        ));
+    }
+    let pts = chart::outline(shown);
+    let mut area = PathBuilder::fill();
+    area.move_to(at(pts[0].0, 0.));
+    for (t, d) in &pts {
+        area.line_to(at(*t, *d));
+    }
+    area.line_to(at(chart::T_MAX, 0.));
+    area.close();
+    if let Ok(path) = area.build() {
+        window.paint_path(path, rgba((p.accent << 8) | 0x33));
+    }
+    let mut line = PathBuilder::stroke(px(2.));
+    line.move_to(at(pts[0].0, pts[0].1));
+    for (t, d) in &pts[1..] {
+        line.line_to(at(*t, *d));
+    }
+    if let Ok(path) = line.build() {
+        window.paint_path(path, rgb(p.accent));
+    }
+    for (i, d) in shown.iter().enumerate() {
+        let c = at(f32::from(control::FAN_ANCHORS[i]), f32::from(*d));
+        let r = px(if active == Some(i) { 7. } else { 5. });
+        window.paint_quad(quad(
+            Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)),
+            Corners::all(r),
+            rgb(p.accent),
+            Edges::all(px(2.)),
+            rgb(p.panel),
+            BorderStyle::Solid,
+        ));
+    }
 }
 
 fn section(p: Palette, title: &str) -> Div {
@@ -1435,7 +1543,7 @@ impl Ui {
             )
             .child(note(
                 p,
-                format!("Duty at each temperature, linear in between. Fan 1 follows the CPU temperature, fan 2 the GPU's; both run at 100 % from {} °C or without a sensor.", control::FAN_PANIC_C),
+                format!("Drag the dots: duty at each temperature, linear in between. The curve never falls and stays at {} % or more from {} °C. Fan 1 follows the CPU temperature, fan 2 the GPU's; both run at 100 % from {} °C or without a sensor.", control::FAN_MIN_AT_TOP, control::FAN_ANCHORS[4], control::FAN_PANIC_C),
             ));
         if s.fan.enabled && !s.service {
             profile = profile.child(
@@ -1458,52 +1566,150 @@ impl Ui {
             .into_any_element()
     }
 
-    /// Five duty sliders, one per anchor temperature, for fan 0 (CPU) or 1 (GPU).
+    /// One fan's duty curve (fan 0 = CPU, 1 = GPU) as a chart: drag a dot up or down, or press
+    /// anywhere to take the dot of the nearest column. Every dot is a vertical slider over the same
+    /// plot, so the debounce, the release and the hardware job are the sliders'.
     fn fan_curve(&self, cx: &mut Context<Self>, title: &str, fan: usize, duty: [u8; 5]) -> Div {
-        const IDS: [[&str; 5]; 2] = [
-            [
-                "fan-cpu-0",
-                "fan-cpu-1",
-                "fan-cpu-2",
-                "fan-cpu-3",
-                "fan-cpu-4",
-            ],
-            [
-                "fan-gpu-0",
-                "fan-gpu-1",
-                "fan-gpu-2",
-                "fan-gpu-3",
-                "fan-gpu-4",
-            ],
-        ];
+        const H: f32 = 180.;
+        const AXIS_W: f32 = 36.;
+        const GUTTER_W: f32 = 32.;
         let p = self.p();
-        let mut sec = section(p, title);
+        let ids = FAN_IDS[fan];
+        let bounds = self.sliders.borrow().get(ids[0]).and_then(|r| r.bounds);
         for (i, d) in duty.into_iter().enumerate() {
-            let labels = if i == 4 {
-                vec![(0, "0".into()), (10, "50".into()), (20, "100".into())]
-            } else {
-                vec![]
-            };
-            sec = sec
-                .child(row(
-                    p,
-                    format!("{} °C", control::FAN_ANCHORS[i]),
-                    format!("{d} %"),
-                ))
-                .child(self.slider(
-                    cx,
-                    SliderSpec {
-                        id: IDS[fan][i],
-                        n: 21,
-                        value: usize::from(d) / 5,
-                        fill: true,
-                        labels,
-                        cells: None,
+            self.sliders.borrow_mut().insert(
+                ids[i],
+                SliderReg {
+                    bounds,
+                    n: 101,
+                    value: usize::from(d),
+                    pick: Rc::new(move |k| Box::new(move |hw| hw.set_fan_point(fan, i, k as u8))),
+                    vertical: true,
+                    // the last point never goes below the floor the profile demands
+                    lo: if i == 4 {
+                        usize::from(control::FAN_MIN_AT_TOP)
+                    } else {
+                        0
                     },
-                    move |k| Box::new(move |hw| hw.set_fan_point(fan, i, (k * 5) as u8)),
-                ));
+                },
+            );
         }
-        sec
+        // while dragging, show the curve the way it will be saved: the other dots move along
+        let held = self
+            .slider
+            .thumb
+            .and_then(|(id, k)| ids.iter().position(|x| *x == id).map(|i| (i, k)));
+        let mut shown = duty;
+        if let Some((i, k)) = held {
+            control::set_curve_point(&mut shown, i, k as u8);
+        }
+
+        let regs = self.sliders.clone();
+        let plot = div()
+            .id(("fan-chart", fan))
+            .relative()
+            .flex_1()
+            .h(px(H))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |ui, e: &MouseDownEvent, _, cx| {
+                    ui.chart_press(fan, (f32::from(e.position.x), f32::from(e.position.y)), cx)
+                }),
+            )
+            .child(
+                canvas(
+                    move |b, _, _| {
+                        for id in ids {
+                            if let Some(r) = regs.borrow_mut().get_mut(id) {
+                                r.bounds = Some(b);
+                            }
+                        }
+                    },
+                    move |b, _, window, _| paint_chart(window, b, p, &shown, held.map(|(i, _)| i)),
+                )
+                .absolute()
+                .size_full(),
+            );
+        let label = |text: String| {
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(p.muted))
+                .child(text)
+        };
+        let y_axis = div()
+            .relative()
+            .w(px(AXIS_W))
+            .h(px(H))
+            .children((0..=5).map(|k| {
+                let d = k * 20;
+                div()
+                    .absolute()
+                    .right_0()
+                    .top(px((1. - d as f32 / 100.) * H - 7.))
+                    .child(label(format!("{d}%")))
+            }));
+        let x_axis = div()
+            .relative()
+            .flex_1()
+            .h(px(16.))
+            .children((30..=100).step_by(10).map(|t| {
+                div()
+                    .absolute()
+                    .left(relative(chart::frac_x(t as f32)))
+                    .ml(px(-20.))
+                    .w(px(40.))
+                    .flex()
+                    .justify_center()
+                    .child(label(t.to_string()))
+            }));
+        // each dot's exact value under its own column: the duty, then the temperature it is set at
+        let values = div().relative().flex_1().h(px(32.)).children(
+            control::FAN_ANCHORS.iter().zip(shown).map(|(t, d)| {
+                div()
+                    .absolute()
+                    .left(relative(chart::frac_x(f32::from(*t))))
+                    .ml(px(-24.))
+                    .w(px(48.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(div().text_size(px(12.)).child(format!("{d} %")))
+                    .child(label(format!("{t} °C")))
+            }),
+        );
+        section(p, title).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                // the gutter right of the plot keeps the last tick inside the section and holds
+                // the unit of the x axis
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(y_axis)
+                        .child(plot)
+                        .child(div().w(px(GUTTER_W))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().w(px(AXIS_W)))
+                        .child(x_axis)
+                        .child(div().w(px(GUTTER_W)).pl(px(10.)).child(label("°C".into()))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().w(px(AXIS_W)))
+                        .child(values)
+                        .child(div().w(px(GUTTER_W))),
+                ),
+        )
     }
 
     fn keyboard_tab(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1977,7 +2183,7 @@ impl Render for Ui {
             .on_mouse_move(cx.listener(|ui, e: &MouseMoveEvent, _, cx| {
                 if ui.slider.down {
                     if e.pressed_button == Some(MouseButton::Left) {
-                        ui.slider_drag(f32::from(e.position.x), cx);
+                        ui.slider_drag((f32::from(e.position.x), f32::from(e.position.y)), cx);
                     } else {
                         ui.slider_release(cx);
                     }
@@ -2267,5 +2473,15 @@ mod tests {
         assert_eq!(step_at(900.0, 100.0, 400.0, 5), 4, "right of the track");
         assert_eq!(step_at(250.0, 100.0, 0.0, 5), 0, "not laid out yet");
         assert_eq!(step_at(250.0, 100.0, 400.0, 1), 0, "single position");
+    }
+
+    #[test]
+    fn a_vertical_track_counts_up_from_the_bottom() {
+        // 101 positions over a 200 px track from y = 100 to 300: 2 px per percent
+        assert_eq!(step_at_y(300.0, 100.0, 200.0, 101), 0, "bottom");
+        assert_eq!(step_at_y(100.0, 100.0, 200.0, 101), 100, "top");
+        assert_eq!(step_at_y(200.0, 100.0, 200.0, 101), 50, "middle");
+        assert_eq!(step_at_y(500.0, 100.0, 200.0, 101), 0, "below the track");
+        assert_eq!(step_at_y(0.0, 100.0, 200.0, 101), 100, "above the track");
     }
 }

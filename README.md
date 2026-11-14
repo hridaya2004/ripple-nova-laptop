@@ -46,7 +46,7 @@ on a real laptop.
   profile preset* with a "default preset" reset. The hardware button is followed, the lights follow the profile, and
   the profile the EC is running is recognised at boot.
 - **Fans**: Auto (firmware), Boost, and a **Custom fan profile**: two curves (fan 1 = CPU fan, fan 2 = GPU fan), five
-  points each at 45/55/65/75/85 °C, independent of the profile, switchable off any time, with a default preset and
+  points each at 45/55/65/75/85 °C (dragged on a chart in the window), independent of the profile, switchable off any time, with a default preset and
   failsafes (see [fans](#custom-fan-profile)). Plus an auto-boost threshold in the window.
 - **Keyboard backlight** (EC solution): colour (hue/saturation/brightness), static rainbow, off.
 - **Platform toggles**: Fn lock, Super key and a **Touchpad power** switch (off = the touchpad is powered down: no

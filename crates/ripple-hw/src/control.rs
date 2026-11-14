@@ -611,7 +611,7 @@ pub const FAN_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 const MANUAL_BIT: u8 = 0x40;
 /// Floor for the duty at the last anchor, so a curve can never let a hot machine's fans stop (the
 /// 90 °C rule is the last resort, not the plan).
-const FAN_MIN_AT_TOP: u8 = 60;
+pub const FAN_MIN_AT_TOP: u8 = 60;
 /// Fans slow down by at most this many points per tick, i.e. 2 per second (they speed up at once).
 /// The EC sets both duties to full whenever the mode byte is written (a mode change, say), so a short
 /// tick also keeps that blast short.
