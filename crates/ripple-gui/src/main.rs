@@ -1505,7 +1505,11 @@ impl Ui {
             }
             None => {
                 if let Some((a, b)) = s.pl {
-                    changes = changes.child(row(p, "CPU PL1 / PL2", format!("{a} / {b} W")));
+                    let limits = match s.pl4 {
+                        Some(c) => format!("{a} / {b} / {c} W"),
+                        None => format!("{a} / {b} W"),
+                    };
+                    changes = changes.child(row(p, "CPU PL1 / PL2 / PL4", limits));
                 }
             }
         }
