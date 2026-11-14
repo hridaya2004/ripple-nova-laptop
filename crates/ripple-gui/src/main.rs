@@ -33,6 +33,12 @@ use ripple_hw::control::{self, Hsv, Profile};
 use ripple_hw::notify::{ensure_tray, popups_enabled, toggle_label};
 use settings::Settings;
 
+/// The type scale: body text, secondary notes, captions (axis ticks, column headers). Nothing is bold;
+/// the hierarchy is size, colour and case.
+const TEXT_BODY: f32 = 13.;
+const TEXT_NOTE: f32 = 12.;
+const TEXT_CAPTION: f32 = 11.;
+
 /// Zed's One Dark / One Light, reduced to what this UI uses.
 #[derive(Clone, Copy)]
 struct Palette {
@@ -247,6 +253,8 @@ struct Ui {
     system_font: SharedString,
     fonts: Vec<String>,
     dropdown_open: bool,
+    /// The profile whose Delete button was clicked once (a second click deletes it).
+    confirm_delete: Option<usize>,
     /// The two text fields: the keyboard colour as hex, and the font family.
     hex: TextInput,
     font: TextInput,
@@ -303,6 +311,7 @@ impl Ui {
             settings,
             system_font: settings::system_mono().into(),
             dropdown_open: start.open && start.tab == Tab::Profiles,
+            confirm_delete: None,
             hex: TextInput::new(|c| c == '#' || c.is_ascii_hexdigit(), 7),
             font: TextInput::new(|c| !c.is_control(), 64),
             hex_focus: cx.focus_handle(),
@@ -342,6 +351,7 @@ impl Ui {
         cx: &mut Context<Self>,
         job: impl FnOnce(&mut Hw) -> Result<String, String> + Send + 'static,
     ) {
+        self.confirm_delete = None;
         self.run(cx, job, false);
     }
 
@@ -381,6 +391,27 @@ impl Ui {
         self.shared.publish(snap.clone());
         self.snap = snap;
         cx.notify();
+    }
+
+    /// Delete on the second click within a few seconds; the first only arms the button.
+    fn delete_clicked(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.confirm_delete == Some(idx) {
+            self.act(cx, move |hw| hw.delete_profile(idx));
+            return;
+        }
+        self.confirm_delete = Some(idx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(4)).await;
+            this.update(cx, |ui, cx| {
+                if ui.confirm_delete == Some(idx) {
+                    ui.confirm_delete = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Switch the open-at-login entry; the result (or error) goes to the status bar.
@@ -792,7 +823,7 @@ impl Ui {
                     .top(px(30.))
                     .flex()
                     .justify_center()
-                    .text_size(px(11.))
+                    .text_size(px(TEXT_CAPTION))
                     .text_color(rgb(if *i == shown { p.fg } else { p.muted }))
                     .child(text.clone()),
             );
@@ -975,7 +1006,7 @@ fn row(p: Palette, label: impl Into<SharedString>, value: impl Into<SharedString
 fn note(p: Palette, text: impl Into<SharedString>) -> Div {
     div()
         .text_color(rgb(p.muted))
-        .text_size(px(12.))
+        .text_size(px(TEXT_NOTE))
         .child(text.into())
 }
 
@@ -1184,6 +1215,7 @@ impl Ui {
                     .on_click(cx.listener(move |ui, _, window, cx| {
                         ui.tab = tab;
                         ui.dropdown_open = false;
+                        ui.confirm_delete = None;
                         window.blur(); // ends any text editing
                         cx.notify();
                     }))
@@ -1213,7 +1245,7 @@ impl Ui {
             .bg(rgb(p.title))
             .border_t_1()
             .border_color(rgb(p.border))
-            .text_size(px(12.))
+            .text_size(px(TEXT_NOTE))
             .text_color(rgb(p.muted))
             .child(div().truncate().child(left))
             .child(div().truncate().child(s.event.clone()))
@@ -1292,7 +1324,7 @@ impl Ui {
                 .gap_3()
                 .px_2()
                 .h(px(24.))
-                .text_size(px(11.))
+                .text_size(px(TEXT_CAPTION))
                 .text_color(rgb(p.muted))
                 .child(div().w(px(8.)))
                 .child(div().w(px(NAME_W)).child("PROFILE"))
@@ -1494,11 +1526,19 @@ impl Ui {
                                         ui.act(cx, move |hw| hw.reset_custom(i))
                                     })),
                             )
-                            .child(button(p, "custom-delete", "Delete", false).on_click(
-                                cx.listener(move |ui, _, _, cx| {
-                                    ui.act(cx, move |hw| hw.delete_profile(i))
-                                }),
-                            )),
+                            .child(
+                                button(
+                                    p,
+                                    "custom-delete",
+                                    if self.confirm_delete == Some(i) {
+                                        "Click again to delete"
+                                    } else {
+                                        "Delete"
+                                    },
+                                    self.confirm_delete == Some(i),
+                                )
+                                .on_click(cx.listener(move |ui, _, _, cx| ui.delete_clicked(i, cx))),
+                            ),
                     )
                     .child(row(p, "CPU PL1 (Sustained Power)", format!("{} W", pr.pl1)))
                     .child(self.custom_slider(cx, "custom-pl1", i, Field::Pl1, pr.pl1, 5..=control::PL_CEILING_W))
@@ -1680,11 +1720,11 @@ impl Ui {
             .flex_col()
             .gap_3()
             .child(mode)
-            .child(fans)
             .child(profile)
             .child(cpu)
             .child(gpu)
             .child(auto)
+            .child(fans)
             .into_any_element()
     }
 
@@ -1701,7 +1741,7 @@ impl Ui {
         edit: Option<Profile>,
     ) -> Div {
         const H: f32 = 180.;
-        const AXIS_W: f32 = 36.;
+        const AXIS_W: f32 = 40.;
         const GUTTER_W: f32 = 32.;
         let p = self.p();
         let ids = FAN_IDS[fan];
@@ -1768,7 +1808,7 @@ impl Ui {
             );
         let label = |text: String| {
             div()
-                .text_size(px(11.))
+                .text_size(px(TEXT_CAPTION))
                 .text_color(rgb(p.muted))
                 .child(text)
         };
@@ -1782,7 +1822,7 @@ impl Ui {
                     .absolute()
                     .right_0()
                     .top(px((1. - d as f32 / 100.) * H - 7.))
-                    .child(label(format!("{d}%")))
+                    .child(label(format!("{d} %")))
             }));
         let x_axis = div()
             .relative()
@@ -1809,7 +1849,7 @@ impl Ui {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .child(div().text_size(px(12.)).child(format!("{d} %")))
+                    .child(div().text_size(px(TEXT_NOTE)).child(format!("{d} %")))
                     .child(label(format!("{t} °C")))
             }),
         );
@@ -1918,7 +1958,7 @@ impl Ui {
                 n: 11,
                 value: (usize::from(hsv.s) + 5) / 10,
                 fill: false,
-                labels: vec![(0, "0%".into()), (10, "100%".into())],
+                labels: vec![(0, "0 %".into()), (10, "100 %".into())],
                 cells: Some((0..=10).map(|i| hsv_hex(hsv.h, i * 10, 100)).collect()),
             },
             |i| {
@@ -2005,9 +2045,16 @@ impl Ui {
             .into_any_element()
     }
 
-    /// One platform toggle: its name, what it does, and a switch. `i` is its place in the snapshot's
-    /// toggle list.
-    fn toggle_row(&self, cx: &mut Context<Self>, i: usize, name: &'static str, on: bool) -> Div {
+    /// One on/off setting: its name, what it does, and the switch at the right. The same row everywhere.
+    fn switch_row(
+        &self,
+        cx: &mut Context<Self>,
+        id: impl Into<ElementId>,
+        label: &str,
+        what: &str,
+        on: bool,
+        toggle: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> Div {
         let p = self.p();
         div()
             .flex()
@@ -2016,12 +2063,23 @@ impl Ui {
             .gap_4()
             .child(
                 div()
-                    .child(toggle_label(name))
-                    .child(note(p, toggle_description(name))),
+                    .child(label.to_string())
+                    .child(note(p, what.to_string())),
             )
-            .child(switch(p, ("toggle", i), on).on_click(
-                cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on))),
-            ))
+            .child(switch(p, id, on).on_click(cx.listener(move |ui, _, _, cx| toggle(ui, cx))))
+    }
+
+    /// One platform toggle: its name, what it does, and a switch. `i` is its place in the snapshot's
+    /// toggle list.
+    fn toggle_row(&self, cx: &mut Context<Self>, i: usize, name: &'static str, on: bool) -> Div {
+        self.switch_row(
+            cx,
+            ("toggle", i),
+            toggle_label(name),
+            toggle_description(name),
+            on,
+            move |ui, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on)),
+        )
     }
 
     /// The touchpad's power switch.
@@ -2059,24 +2117,6 @@ impl Ui {
         let p = self.p();
         let s = &self.snap;
         let mut toggles = section(p, "Toggles");
-        let popups = self.settings.popups;
-        toggles = toggles.child(
-            div()
-                .flex()
-                .justify_between()
-                .items_center()
-                .gap_4()
-                .child(div().child("Show popup").child(note(
-                    p,
-                    "Notify when a toggle, the performance profile or fan boost changes.",
-                )))
-                .child(
-                    switch(p, "popup-toggle", popups).on_click(cx.listener(|ui, _, _, cx| {
-                        ui.settings.popups = !ui.settings.popups;
-                        ui.save_settings(cx);
-                    })),
-                ),
-        );
         let system_toggles = s
             .toggles
             .iter()
@@ -2258,24 +2298,34 @@ impl Ui {
                 "Type to search the installed fonts; Up/Down and Enter or a click picks. Empty is the system monospace font.",
             ));
 
+        let notifications = section(p, "Notifications").child(self.switch_row(
+            cx,
+            "popup-toggle",
+            "Show popup",
+            "Notify when the performance profile, fan boost or a toggle changes. The tray menu switches this too.",
+            self.settings.popups,
+            |ui, cx| {
+                ui.settings.popups = !ui.settings.popups;
+                ui.save_settings(cx);
+            },
+        ));
         let startup = section(p, "Startup")
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(switch(p, "autostart", self.autostart).on_click(cx.listener(|ui, _, _, cx| ui.toggle_autostart(cx))))
-                    .child("Open at login"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(switch(p, "start-min", self.settings.start_minimized).on_click(cx.listener(|ui, _, _, cx| ui.toggle_start_minimized(cx))))
-                    .child("Start minimized"),
-            )
-            .child(note(p, "Open at login starts the app at login: the window and the tray icon (no password: the sudoers rule from install.sh, else polkit asks). Start minimized starts only the tray icon, which opens the window. The service always starts at boot."));
+            .child(self.switch_row(
+                cx,
+                "autostart",
+                "Open at login",
+                "Starts the window and the tray icon when you log in (no password: the sudoers rule from install.sh, else polkit asks).",
+                self.autostart,
+                |ui, cx| ui.toggle_autostart(cx),
+            ))
+            .child(self.switch_row(
+                cx,
+                "start-min",
+                "Start minimized",
+                "At login only the tray icon starts, which opens the window. The service always starts at boot.",
+                self.settings.start_minimized,
+                |ui, cx| ui.toggle_start_minimized(cx),
+            ));
 
         div()
             .flex()
@@ -2283,6 +2333,7 @@ impl Ui {
             .gap_3()
             .child(theme)
             .child(font)
+            .child(notifications)
             .child(startup)
             .into_any_element()
     }
@@ -2319,7 +2370,7 @@ impl Render for Ui {
             .bg(rgb(p.bg))
             .text_color(rgb(p.fg))
             .font_family(self.family())
-            .text_size(px(13.))
+            .text_size(px(TEXT_BODY))
             .border_1()
             .border_color(rgb(p.border))
             // slider drags continue outside the slider, anywhere in the window

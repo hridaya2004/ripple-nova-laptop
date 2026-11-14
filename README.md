@@ -62,7 +62,7 @@ on a real laptop.
   polkit asks for a password instead.
   The window starts the tray icon too, and so does login when *Open at login* is on.
 - **Popups** (any freedesktop notification daemon): when the profile, fan boost or a toggle changes, whoever changed it
-  (window, hardware button, Fn key, CLI). Optional: System → Toggles → *Show popup*, the tray menu's *Enable / Disable notifications*,
+  (window, hardware button, Fn key, CLI). Optional: Settings → Notifications → *Show popup*, the tray menu's *Enable / Disable notifications*,
   or `rcc popups on|off`.
 - **Window**: dark/light theme, a font field with typeahead over every installed family, an editable hex keyboard
   colour, no password prompt. Closing the window ends it; the tray icon opens it again.
