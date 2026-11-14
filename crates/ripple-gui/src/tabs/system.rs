@@ -13,12 +13,12 @@ pub(crate) fn toggle_description(name: &str) -> &str {
         "usb_powershare_high" => {
             "Keep the USB ports powered when off (enabling it turns AC auto-boot off)"
         }
-        "touchpad" => "Off: no pointer and its LED lights. Switch it here or with the double tap in its top-left corner",
+        "touchpad" => "Off: no pointer and its LED lights. Switch it here, with the double tap in its top-left corner, or with `sudo -n rcc touchpad toggle` on a keyboard shortcut",
         "breathing_in_suspend" => {
             "Breathing LED animation while suspended on AC power (a lightbar feature)"
         }
         "touchpad_toggle_enable" => {
-            "The firmware's own touchpad toggle; no effect seen on this laptop"
+            "The firmware's own touchpad toggle: the double tap in its top-left corner"
         }
         _ => "",
     }
@@ -81,10 +81,6 @@ impl Ui {
             for (i, (name, on)) in mine {
                 touchpad = touchpad.child(self.toggle_row(cx, i, name, on));
             }
-            touchpad = touchpad.child(note(
-                p,
-                "With the touchpad off there is no pointer: `sudo -n rcc touchpad toggle`, bound to a keyboard shortcut, brings it back.",
-            ));
         }
         div()
             .flex()

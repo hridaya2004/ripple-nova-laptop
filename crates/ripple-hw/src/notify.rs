@@ -159,7 +159,7 @@ pub fn toggle_label(name: &str) -> &str {
         "rainbow_animation" => "Lightbar rainbow",
         "breathing_in_suspend" => "Breathing in suspend",
         "touchpad" => "Touchpad power",
-        "touchpad_toggle_enable" => "Touchpad toggle (firmware)",
+        "touchpad_toggle_enable" => "Touchpad toggle",
         "ac_auto_boot" => "AC Auto-Boot",
         "usb_powershare_high" => "USB powershare",
         other => other,
