@@ -660,7 +660,7 @@ fn apply_profile(
 ) -> CmdResult {
     let pr = control::preset_for(stock, &cfg.profiles, p);
     let sysfs = uniwill(cli).ok();
-    control::apply(ec, sysfs.as_ref(), pr)?;
+    let pl4_refused = control::apply(ec, sysfs.as_ref(), pr)?;
     control::set_mode_byte(ec, p)?; // the button's mode lights (0/1/2) + the EC's fan profile
     control::remember_profile(&cfg.profiles, p); // which of two with the same limits is running
     println!(
@@ -671,6 +671,9 @@ fn apply_profile(
         pr.pl4,
         pr.ctgp
     );
+    if let Some(why) = pl4_refused {
+        eprintln!("warning: PL4 was not applied ({why}); PL1 and PL2 were");
+    }
     if sysfs.is_none() && pr.ctgp > 0 {
         println!("note: uniwill kernel driver not available, GPU cTGP not applied");
     }

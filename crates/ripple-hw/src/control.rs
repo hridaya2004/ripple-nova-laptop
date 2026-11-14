@@ -438,8 +438,13 @@ impl Config {
     }
 }
 
-/// Apply a preset: PL1/PL2/PL4 via EC (read back to verify), cTGP via the kernel attr.
-pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwResult<()> {
+/// Apply a preset: PL1/PL2/PL4 via EC (read back to verify), cTGP via the kernel attr. PL4 is best
+/// effort: `Ok(Some(why))` means the EC refused it and everything else was applied.
+pub fn apply(
+    ec: &mut dyn EcAccess,
+    sysfs: Option<&SysfsEc>,
+    p: Preset,
+) -> HwResult<Option<String>> {
     p.validate().map_err(HwError::Other)?;
     // Keep PL1 <= PL2 <= PL4 at every step: what goes up is written from the top down (PL4, PL2,
     // PL1), what goes down from the bottom up.
@@ -449,8 +454,7 @@ pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwRes
         (addr::PL2_SETTING, p.pl2),
         (addr::PL4_SETTING, p.pl4),
     ] {
-        // PL4 is best effort: an EC that refuses it must not stop the limits that matter, nor the
-        // daemon at boot (the window shows the live PL4, so a refusal is visible there)
+        // an EC that refuses PL4 must not stop the limits that matter, nor the daemon at boot
         let now = if reg == addr::PL4_SETTING {
             ec.read(reg).unwrap_or(0)
         } else {
@@ -462,9 +466,10 @@ pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwRes
             down.push((reg, want));
         }
     }
+    let mut pl4_refused = None;
     for (reg, want) in up.into_iter().rev().chain(down) {
         match ec.write_verified(reg, want) {
-            Err(e) if reg == addr::PL4_SETTING => eprintln!("PL4 not applied: {e}"),
+            Err(e) if reg == addr::PL4_SETTING => pl4_refused = Some(e.to_string()),
             r => r?,
         }
     }
@@ -478,7 +483,7 @@ pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwRes
             )));
         }
     }
-    Ok(())
+    Ok(pl4_refused)
 }
 
 /// The custom profile applied last, by name. Limits alone cannot tell a profile from the stock one it
@@ -590,7 +595,9 @@ pub fn adopt(
         return Ok(None);
     };
     if (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?) == (0, 0) {
-        apply(ec, sysfs, preset_for(stock, customs, p))?;
+        if let Some(why) = apply(ec, sysfs, preset_for(stock, customs, p))? {
+            eprintln!("PL4 not applied: {why}");
+        }
     }
     // what the EC's own byte already announces (Windows leaves Turbo as 0x10) is not rewritten
     if Profile::from_mode_byte(ec.read(addr::MAFAN_CONTROL_BYTE)?) != Some(p) {
@@ -1463,6 +1470,13 @@ mod tests {
         // an invalid preset writes nothing
         assert!(apply(&mut ec, None, p(65, 65, 60)).is_err());
         assert_eq!(limits(&mut ec), [65, 65, 90]);
+        // an EC that refuses PL4 still gets PL1/PL2, and the refusal is reported, not hidden
+        let mut refusing = crate::mock::MockEc::new();
+        refusing.fail_on.push(addr::PL4_SETTING);
+        let why = apply(&mut refusing, None, p(55, 55, 145)).unwrap();
+        assert!(why.is_some_and(|w| w.contains("ec communication failure")));
+        assert_eq!(refusing.read(addr::PL1_SETTING).unwrap(), 55);
+        assert_eq!(refusing.read(addr::PL2_SETTING).unwrap(), 55);
     }
 
     #[test]

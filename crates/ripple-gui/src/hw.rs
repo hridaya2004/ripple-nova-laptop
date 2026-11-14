@@ -322,19 +322,22 @@ impl Hw {
         let pr = self.preset(p);
         let sysfs = self.sysfs.take();
         let r = self.ec().and_then(|ec| {
-            control::apply(ec, sysfs.as_ref(), pr).map_err(|e| e.to_string())?;
-            control::set_mode_byte(ec, p).map_err(|e| e.to_string()) // mode lights + fan profile
+            let pl4 = control::apply(ec, sysfs.as_ref(), pr).map_err(|e| e.to_string())?;
+            control::set_mode_byte(ec, p).map_err(|e| e.to_string())?; // mode lights + fan profile
+            Ok(pl4)
         });
         self.sysfs = sysfs;
-        r?;
+        let pl4 = match r? {
+            None => format!("PL4 {} W", pr.pl4),
+            Some(_) => "PL4 not applied".to_string(),
+        };
         // limits alone cannot tell a profile from the stock one it was copied from
         control::remember_profile(&Config::load().profiles, p);
         Ok(format!(
-            "{}: PL1 {} W / PL2 {} W / PL4 {} W / GPU cTGP +{} W",
+            "{}: PL1 {} W / PL2 {} W / {pl4} / GPU cTGP +{} W",
             self.label(p),
             pr.pl1,
             pr.pl2,
-            pr.pl4,
             pr.ctgp
         ))
     }
