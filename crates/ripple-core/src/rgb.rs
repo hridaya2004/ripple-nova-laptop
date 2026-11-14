@@ -7,15 +7,6 @@ use std::path::Path;
 
 use crate::Result;
 
-/// Effect bank (`RGBKB_Mode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Bank {
-    Lighting = 1,
-    Welcome = 2,
-    Night = 3,
-}
-
 /// Effect id (`RGBKB_Effect` — a subset of the OEM list).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Effect {

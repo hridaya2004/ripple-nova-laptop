@@ -869,6 +869,8 @@ pub struct FanCurves {
     pub gpu: [u8; 5],
 }
 
+/// Only the tests start from a ready-made curve; the real defaults are per mode (`default_fan_set`).
+#[cfg(test)]
 impl Default for FanCurves {
     fn default() -> Self {
         Self {

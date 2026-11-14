@@ -77,11 +77,6 @@ impl FanTable {
         Ok(serde_json::from_str(&text)?)
     }
 
-    /// Parse from a JSON string.
-    pub fn from_json(s: &str) -> Result<Self> {
-        Ok(serde_json::from_str(s)?)
-    }
-
     /// Parse a power-limit field: `"20"` → `20.0`, `"NA"`/missing → `None`.
     pub fn pl_watts(s: Option<&String>) -> Option<f64> {
         s.as_ref()
@@ -95,18 +90,6 @@ impl FanTable {
 
     pub fn pl2(&self) -> Option<f64> {
         Self::pl_watts(self.PL2.as_ref())
-    }
-
-    /// `M1T1` → `(1, 1)`.
-    pub fn m_t_index(&self) -> Option<(u8, u8)> {
-        let n = &self.Name;
-        if n.len() != 4 || !n.starts_with('M') || n.as_bytes()[2] != b'T' {
-            return None;
-        }
-        Some((
-            n.as_bytes()[1].wrapping_sub(b'0'),
-            n.as_bytes()[3].wrapping_sub(b'0'),
-        ))
     }
 }
 
@@ -160,9 +143,8 @@ mod tests {
 
     #[test]
     fn parse_sample() {
-        let t = FanTable::from_json(SAMPLE).unwrap();
+        let t = serde_json::from_str::<FanTable>(SAMPLE).unwrap();
         assert_eq!(t.Name, "M1T1");
-        assert_eq!(t.m_t_index(), Some((1, 1)));
         assert_eq!(t.pl1(), Some(20.0));
         assert_eq!(t.pl2(), Some(60.0));
         assert_eq!(t.CPU.len(), 2);
@@ -172,7 +154,7 @@ mod tests {
 
     #[test]
     fn na_power_limits() {
-        let mut t = FanTable::from_json(SAMPLE).unwrap();
+        let mut t = serde_json::from_str::<FanTable>(SAMPLE).unwrap();
         t.PL1 = Some("NA".into());
         assert_eq!(t.pl1(), None);
         t.PL1 = None;

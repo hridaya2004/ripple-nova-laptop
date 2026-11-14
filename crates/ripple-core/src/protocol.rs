@@ -37,12 +37,6 @@ pub fn decode_read(ret: u32) -> Option<u8> {
     }
 }
 
-/// The ACPI `WMBC` argument when only encoding the value (some backends pass
-/// `addr` and the value separately — provided for completeness).
-pub fn wmbc_read(addr: u16) -> u64 {
-    encode_read(addr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

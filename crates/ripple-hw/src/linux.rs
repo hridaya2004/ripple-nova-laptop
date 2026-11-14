@@ -639,14 +639,6 @@ impl SysfsEc {
         }
     }
 
-    pub fn hwmon_dir(&self) -> &std::path::Path {
-        &self.hwmon
-    }
-
-    pub fn platform_dir(&self) -> Option<&std::path::Path> {
-        self.platform.as_deref()
-    }
-
     /// One-line inventory for `rcc doctor`.
     pub fn summary(&self) -> String {
         let mut bits: Vec<String> = Vec::new();

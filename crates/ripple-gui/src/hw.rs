@@ -105,6 +105,7 @@ impl Default for Snapshot {
             pl4: 0,
             ctgp: 0,
         };
+        let gaming = control::default_fan_set(OperatingMode::Gaming);
         Self {
             model: String::new(),
             backend: String::new(),
@@ -118,8 +119,12 @@ impl Default for Snapshot {
             stock: [p; 3],
             customs: vec![],
             boosted: false,
-            fan: FanCurves::default(),
-            fan_default: control::default_fan_set(OperatingMode::Gaming),
+            fan: FanCurves {
+                enabled: false,
+                cpu: gaming.cpu,
+                gpu: gaming.gpu,
+            },
+            fan_default: gaming,
             auto_boost: None,
             has_lightbar: false,
             lightbar: None,

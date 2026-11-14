@@ -53,16 +53,6 @@ impl std::str::FromStr for OperatingMode {
     }
 }
 
-/// Fan preset (OEM `Fan` enum).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FanPreset {
-    Performance = 1,
-    Standard = 2,
-    Quiet = 3,
-    Benchmark = 4,
-}
-
 /// Battery protection profile (OEM `Protection_Status`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
