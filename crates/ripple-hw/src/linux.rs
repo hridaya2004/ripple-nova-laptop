@@ -371,37 +371,41 @@ impl EcAccess for AcpiCallEc {
 
     fn read(&mut self, addr: u16) -> HwResult<u8> {
         let full = format!("{}.ECRR", self.device);
-        let v = match acpi_call_raw(&full, &[addr as u64]) {
-            Ok(v) => v,
-            Err(HwError::EcFail { .. }) => return Err(HwError::EcFail { addr }),
-            Err(e) => return Err(e),
-        };
-        if self.pace {
-            std::thread::sleep(crate::EC_PACE);
-        }
-        if (v as u32) == protocol::EC_FAIL {
-            return Err(HwError::EcFail { addr });
-        }
-        Ok((v & 0xFF) as u8)
+        crate::with_retries(|| {
+            let v = match acpi_call_raw(&full, &[addr as u64]) {
+                Ok(v) => v,
+                Err(HwError::EcFail { .. }) => return Err(HwError::EcFail { addr }),
+                Err(e) => return Err(e),
+            };
+            if self.pace {
+                std::thread::sleep(crate::EC_PACE);
+            }
+            if (v as u32) == protocol::EC_FAIL {
+                return Err(HwError::EcFail { addr });
+            }
+            Ok((v & 0xFF) as u8)
+        })
     }
 
     fn write(&mut self, addr: u16, value: u8) -> HwResult<()> {
         // ECRW(addr, data) — two args.
         let full = format!("{}.ECRW", self.device);
-        match acpi_call_raw(&full, &[addr as u64, value as u64]) {
-            Ok(_) => {}
-            Err(HwError::EcFail { .. }) => return Err(HwError::EcFail { addr }),
-            Err(e) => return Err(e),
-        }
-        if self.pace {
-            std::thread::sleep(crate::EC_PACE);
-        }
-        Ok(())
+        crate::with_retries(|| {
+            match acpi_call_raw(&full, &[addr as u64, value as u64]) {
+                Ok(_) => {}
+                Err(HwError::EcFail { .. }) => return Err(HwError::EcFail { addr }),
+                Err(e) => return Err(e),
+            }
+            if self.pace {
+                std::thread::sleep(crate::EC_PACE);
+            }
+            Ok(())
+        })
     }
 
     fn fan_duty(&mut self, fan: u8) -> HwResult<u8> {
         let (addr, wmbc) = (fan_duty_addr(fan)?, self.wmbc_path()?);
-        let v = wmbc_call(&wmbc, addr, 0, true)?;
+        let v = crate::with_retries(|| wmbc_call(&wmbc, addr, 0, true))?;
         std::thread::sleep(crate::EC_PACE);
         Ok(v)
     }
@@ -411,7 +415,7 @@ impl EcAccess for AcpiCallEc {
             return Err(HwError::Other(format!("fan duty is 0..=200 (got {duty})")));
         }
         let (addr, wmbc) = (fan_duty_addr(fan)?, self.wmbc_path()?);
-        wmbc_call(&wmbc, addr, duty, false)?;
+        crate::with_retries(|| wmbc_call(&wmbc, addr, duty, false))?;
         std::thread::sleep(crate::EC_PACE);
         Ok(())
     }
@@ -479,31 +483,35 @@ impl EcAccess for WmiEc {
     }
 
     fn read(&mut self, addr: u16) -> HwResult<u8> {
-        let v = match self.call_wmbc(protocol::encode_read(addr)) {
-            Ok(v) => v,
-            Err(HwError::EcFail { .. }) => return Err(HwError::EcFail { addr }),
-            Err(e) => return Err(e),
-        };
-        if self.pace {
-            std::thread::sleep(crate::EC_PACE);
-        }
-        protocol::decode_read(v as u32).ok_or(HwError::EcFail { addr })
+        crate::with_retries(|| {
+            let v = match self.call_wmbc(protocol::encode_read(addr)) {
+                Ok(v) => v,
+                Err(HwError::EcFail { .. }) => return Err(HwError::EcFail { addr }),
+                Err(e) => return Err(e),
+            };
+            if self.pace {
+                std::thread::sleep(crate::EC_PACE);
+            }
+            protocol::decode_read(v as u32).ok_or(HwError::EcFail { addr })
+        })
     }
 
     fn write(&mut self, addr: u16, value: u8) -> HwResult<()> {
-        let v = match self.call_wmbc(protocol::encode_write(addr, value)) {
-            Ok(v) => v,
-            Err(HwError::EcFail { .. }) => return Err(HwError::EcFail { addr }),
-            Err(e) => return Err(e),
-        };
-        if self.pace {
-            std::thread::sleep(crate::EC_PACE);
-        }
-        // Writes return the echoed/op result; 0xFEFEFEFE signals EC failure.
-        if (v as u32) == protocol::EC_FAIL {
-            return Err(HwError::EcFail { addr });
-        }
-        Ok(())
+        crate::with_retries(|| {
+            let v = match self.call_wmbc(protocol::encode_write(addr, value)) {
+                Ok(v) => v,
+                Err(HwError::EcFail { .. }) => return Err(HwError::EcFail { addr }),
+                Err(e) => return Err(e),
+            };
+            if self.pace {
+                std::thread::sleep(crate::EC_PACE);
+            }
+            // Writes return the echoed/op result; 0xFEFEFEFE signals EC failure.
+            if (v as u32) == protocol::EC_FAIL {
+                return Err(HwError::EcFail { addr });
+            }
+            Ok(())
+        })
     }
 }
 

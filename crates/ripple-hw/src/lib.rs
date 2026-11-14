@@ -57,8 +57,23 @@ impl From<HwError> for String {
 
 /// OEM pacing: wait 6 ms after every EC transaction.
 pub const EC_PACE: Duration = Duration::from_millis(6);
-/// Retries before giving up on an EC-failure.
+/// Attempts (the first one included) before giving up on an EC failure.
 pub const EC_RETRIES: u32 = 3;
+
+/// Run one EC transaction, repeating it when the EC answers 0xFEFEFEFE (it was busy): reads, and
+/// writes of an absolute value, are safe to repeat. Any other error is final.
+pub fn with_retries<T>(mut op: impl FnMut() -> HwResult<T>) -> HwResult<T> {
+    let mut attempt = 1;
+    loop {
+        match op() {
+            Err(HwError::EcFail { .. }) if attempt < EC_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(EC_PACE);
+            }
+            r => return r,
+        }
+    }
+}
 
 /// Byte-granular EC register access.
 ///
@@ -159,6 +174,34 @@ pub fn require_root(gui: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_ec_is_asked_again_but_other_errors_are_final() {
+        let mut calls = 0;
+        let r = with_retries(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(HwError::EcFail { addr: 7 })
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(r.unwrap(), 3);
+        calls = 0;
+        let r: HwResult<u32> = with_retries(|| {
+            calls += 1;
+            Err(HwError::EcFail { addr: 7 })
+        });
+        assert!(matches!(r, Err(HwError::EcFail { addr: 7 })));
+        assert_eq!(calls, EC_RETRIES, "gives up after the last attempt");
+        calls = 0;
+        let r: HwResult<u32> = with_retries(|| {
+            calls += 1;
+            Err(HwError::Other("no".into()))
+        });
+        assert!(r.is_err());
+        assert_eq!(calls, 1, "only an EC failure is repeated");
+    }
 
     #[test]
     fn euid_is_the_second_uid_field() {
