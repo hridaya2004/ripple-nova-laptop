@@ -13,7 +13,8 @@
 # the mode button, keeps the profile and the button lights in sync, runs the custom fan profile, sends the
 # popups), the tray icon helper rcc-tray (starts with the window, and at login when Settings > Open at login is
 # on; GNOME needs its AppIndicator extension to show it), and
-# the module list that loads acpi_call and uniwill-laptop at boot, and the uniwill-laptop kernel module
+# the module list that loads acpi_call and uniwill-laptop at boot, a udev hwdb entry that turns the touchpad's
+# double-tap corner gesture (F24) into the touchpad-toggle key, and the uniwill-laptop kernel module
 # itself, built from vendor/uniwill-laptop (a git subtree of Wer-Wolf/uniwill-laptop) for the running kernel
 # into /usr/lib/modules/<kernel>/updates/. It has to be rebuilt after a kernel update: run this again.
 set -euo pipefail
@@ -50,6 +51,7 @@ uninstall() {
         "$DESTDIR/etc/sudoers.d/ripple-nova" \
         "$DESTDIR/etc/modules-load.d/ripple-nova.conf" \
         "$DESTDIR/etc/modprobe.d/ripple-nova.conf" \
+        "$DESTDIR/etc/udev/hwdb.d/61-uniwill-touchpad.hwdb" \
         "$DESTDIR/etc/xdg/autostart/ripple-nova.desktop" \
         "$DESTDIR/etc/xdg/autostart/ripple-nova-tray.desktop" \
         "$DESTDIR"/usr/lib/modules/*/updates/uniwill-laptop.ko
@@ -57,6 +59,7 @@ uninstall() {
     live && { systemctl --user stop ripple-nova-tray 2>/dev/null; pkill -x rcc-tray 2>/dev/null; true; }   # the icon helper runs as you (not running is fine)
     live && $SUDO systemctl daemon-reload
     live && $SUDO depmod -a   # forget the out-of-tree uniwill-laptop (the kernel's own one is used again)
+    live && { $SUDO systemd-hwdb update && $SUDO udevadm trigger --subsystem-match=input --action=change; true; }   # drop the F24 mapping
     say "removed. Your settings stay in /etc/ripple-nova (delete it to forget them)."
 }
 
@@ -137,6 +140,7 @@ $SUDO install -Dm644 dist/ripple-nova.svg "$DESTDIR$PREFIX/share/icons/hicolor/s
 $SUDO install -Dm644 "$tmp/unit" "$DESTDIR/etc/systemd/system/$UNIT"
 $SUDO install -Dm644 dist/modules-load.conf "$DESTDIR/etc/modules-load.d/ripple-nova.conf"
 $SUDO install -Dm644 dist/modprobe.conf "$DESTDIR/etc/modprobe.d/ripple-nova.conf"
+$SUDO install -Dm644 dist/61-uniwill-touchpad.hwdb "$DESTDIR/etc/udev/hwdb.d/61-uniwill-touchpad.hwdb"
 if [ -n "$KO" ]; then
     # the same as: mkdir -p /usr/lib/modules/$(uname -r)/updates && cp uniwill-laptop.ko there && depmod -a
     $SUDO install -Dm644 "$KO" "$DESTDIR/usr/lib/modules/$KREL/updates/uniwill-laptop.ko"
@@ -161,6 +165,9 @@ if [ "$SUDOERS" = 1 ]; then
 fi
 
 if live; then
+    # the touchpad's corner double tap types Ctrl+Meta+F24: map F24 to the touchpad-toggle key (takes effect now)
+    $SUDO systemd-hwdb update && $SUDO udevadm trigger --subsystem-match=input --action=change \
+        || warn "could not apply the touchpad-toggle key mapping: sudo systemd-hwdb update && sudo udevadm trigger --subsystem-match=input"
     command -v update-desktop-database >/dev/null && $SUDO update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
     command -v gtk-update-icon-cache >/dev/null && $SUDO gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
     # "Open at login" keeps its own root-owned copy of the window and a login script (so the build directory
@@ -212,6 +219,8 @@ Installed.
            alone with Start minimized). Its menu switches the performance profile.
            GNOME shows it only with the AppIndicator extension:
            sudo pacman -S gnome-shell-extension-appindicator, then log out and in
+  touchpad double-tap its top-left corner to switch it off and on (F24 is mapped to the touchpad-toggle key:
+           /etc/udev/hwdb.d/61-uniwill-touchpad.hwdb)
   cli      sudo rcc doctor | status | mode get|set|next
   remove   ./install.sh --uninstall
 MSG
