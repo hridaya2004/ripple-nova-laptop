@@ -338,7 +338,7 @@ pub enum BatteryCmd {
     /// Set protection/charge profile
     ///
     /// OEM names map onto the kernel `charge_types` interface:
-    /// performance→Standard, balanced→Trickle, healthy→Long_Life
+    /// performance→Standard, balanced→Long_Life, healthy→Trickle
     /// (native names work too).
     Profile {
         #[arg(value_enum)]
@@ -348,11 +348,11 @@ pub enum BatteryCmd {
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum ProfileChoice {
-    /// OEM: full-speed charging (= charge_types Standard)
+    /// OEM High Capacity: full-speed charging (= charge_types Standard)
     Performance,
-    /// OEM: gentler charging (= charge_types Trickle)
+    /// OEM Balanced: speed and peak capacity slightly reduced (= charge_types Long_Life)
     Balanced,
-    /// OEM: max battery longevity (= charge_types Long_Life)
+    /// OEM Eco: for mostly external power, reduced even more (= charge_types Trickle)
     Healthy,
     /// charge_types: full-speed charging
     Standard,

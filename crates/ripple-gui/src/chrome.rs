@@ -73,6 +73,7 @@ impl Ui {
             (Tab::Profiles, "Profiles"),
             (Tab::Fan, "Fan"),
             (Tab::Keyboard, "Keyboard"),
+            (Tab::Battery, "Battery"),
             (Tab::Device, "Device"),
             (Tab::System, "System"),
             (Tab::Settings, "Settings"),

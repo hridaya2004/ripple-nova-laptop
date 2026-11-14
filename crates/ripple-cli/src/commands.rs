@@ -1370,8 +1370,8 @@ fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
             // OEM names map onto the kernel charge_types interface.
             let want = match profile {
                 ProfileChoice::Performance | ProfileChoice::Standard => "Standard",
-                ProfileChoice::Balanced | ProfileChoice::Trickle => "Trickle",
-                ProfileChoice::Healthy | ProfileChoice::LongLife => "Long_Life",
+                ProfileChoice::Balanced | ProfileChoice::LongLife => "Long_Life",
+                ProfileChoice::Healthy | ProfileChoice::Trickle => "Trickle",
             };
             let (_sel, all) = u.charge_types()?;
             u.set_charge_types(want)?;

@@ -5,7 +5,7 @@
 use ripple_core::modes::OperatingMode;
 use ripple_core::regs::addr;
 use ripple_hw::control::{self, Config, CustomProfile, FanCurves, FanSet, Hsv, Preset, Profile};
-use ripple_hw::linux::{self, SysfsEc};
+use ripple_hw::linux::{self, Battery, SysfsEc};
 use ripple_hw::EcAccess;
 
 /// Dropdown order: the three stock profiles, then the user's own (`Snapshot::customs`).
@@ -59,6 +59,8 @@ pub struct Snapshot {
     pub kb_level: u8,
     pub hsv: Hsv,
     pub toggles: Vec<(&'static str, bool)>,
+    /// The battery's charge profile and readings; `None` without the uniwill driver.
+    pub battery: Option<Battery>,
     /// Is the hardware mode button being followed, and by the systemd service rather than by us?
     pub button: bool,
     pub service: bool,
@@ -138,6 +140,7 @@ impl Default for Snapshot {
                 v: 100,
             },
             toggles: vec![],
+            battery: None,
             button: false,
             service: false,
             debug: String::new(),
@@ -281,6 +284,7 @@ impl Hw {
             if s.has_lightbar {
                 s.lightbar = u.lightbar().ok().map(|(r, g, b, _)| (r, g, b));
             }
+            s.battery = u.battery().ok();
             // Only plain 0/1 attributes become toggles (which ones: `control::toggle_shown`).
             s.toggles = control::platform_toggles(u, s.has_lightbar);
         }
@@ -609,6 +613,20 @@ impl Hw {
             "keyboard: hue {} sat {} % brightness {} % (levels {},{},{})",
             hsv.h, hsv.s, hsv.v, l.0, l.1, l.2
         ))
+    }
+
+    /// Choose the charging profile (`Standard`, `Long_Life` or `Trickle`, the kernel's names).
+    pub fn set_charge_type(&self, kernel: &'static str) -> Result<String, String> {
+        let u = self
+            .sysfs
+            .as_ref()
+            .ok_or("uniwill kernel driver not loaded")?;
+        u.set_charge_types(kernel).map_err(|e| e.to_string())?;
+        let label = linux::CHARGE_PROFILES
+            .iter()
+            .find(|p| p.kernel == kernel)
+            .map_or(kernel, |p| p.label);
+        Ok(format!("charging profile → {label}"))
     }
 
     pub fn set_lightbar(&self, rgb: Option<(u8, u8, u8)>) -> Result<String, String> {

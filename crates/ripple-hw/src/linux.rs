@@ -533,6 +533,65 @@ pub struct SysfsEc {
     platform: Option<std::path::PathBuf>,
 }
 
+/// The three charging profiles of the EC, by the kernel's `charge_types` name, with the OEM's own name and
+/// words for each (its strings: "High Capacity", "Balanced" and "Eco" modes, EC values 0, 1 and 2). The
+/// driver reads 0 as Standard, 1 as Long_Life and 2 as Trickle.
+pub struct ChargeProfile {
+    pub kernel: &'static str,
+    pub label: &'static str,
+    pub oem: &'static str,
+    pub info: &'static str,
+}
+
+pub const CHARGE_PROFILES: [ChargeProfile; 3] = [
+    ChargeProfile {
+        kernel: "Standard",
+        label: "Standard",
+        oem: "High capacity",
+        info: "High charging speed and maximum capacity.",
+    },
+    ChargeProfile {
+        kernel: "Long_Life",
+        label: "Long life",
+        oem: "Balanced",
+        info: "Ideal balance between battery capacity and life. Charging speed and peak capacity are slightly reduced.",
+    },
+    ChargeProfile {
+        kernel: "Trickle",
+        label: "Trickle",
+        oem: "Eco, healthy",
+        info: "For using the laptop almost only on external power. Charging speed and peak capacity are reduced even more.",
+    },
+];
+
+/// The battery's charge profile and readings.
+#[derive(Debug, Clone, Default)]
+pub struct Battery {
+    /// The `charge_types` choice, as the kernel names it (`Standard`, `Long_Life`, `Trickle`).
+    pub selected: String,
+    pub available: Vec<String>,
+    pub status: String,
+    pub health: String,
+    pub capacity: Option<u8>,
+    /// `current_now` in microamps: 0 means the battery is not charging, whatever `status` says.
+    pub current_ua: Option<i32>,
+}
+
+/// `Trickle [Standard] Long_Life` -> (`Standard`, all three).
+fn parse_charge_types(raw: &str) -> (String, Vec<String>) {
+    let mut sel = String::new();
+    let mut all = Vec::new();
+    for tok in raw.split_whitespace() {
+        if let Some(inner) = tok.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+            sel = inner.to_string();
+            all.push(inner.to_string());
+        } else {
+            all.push(tok.to_string());
+        }
+    }
+    (sel, all)
+}
+
 /// Snapshot of the hwmon sensors.
 #[derive(Debug, Default)]
 pub struct Sensors {
@@ -788,33 +847,43 @@ impl SysfsEc {
 
     // ------------------------------------------------------------ battery
 
-    /// `(selected, available)` charge profiles from `charge_types`.
-    /// Format: `Trickle [Standard] Long_Life`.
-    pub fn charge_types(&self) -> HwResult<(String, Vec<String>)> {
+    /// The battery that has the `charge_types` attribute (the uniwill driver's charging interface).
+    fn battery_dir() -> HwResult<std::path::PathBuf> {
         let bat = std::path::Path::new("/sys/class/power_supply");
         for e in std::fs::read_dir(bat)
             .map_err(|e| HwError::Other(format!("power_supply: {e}")))?
             .flatten()
         {
-            let f = e.path().join("charge_types");
-            if f.is_file() {
-                let raw = read_sysfs(&f)?;
-                let mut sel = String::new();
-                let mut all = Vec::new();
-                for tok in raw.split_whitespace() {
-                    if let Some(inner) = tok.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
-                        sel = inner.to_string();
-                        all.push(inner.to_string());
-                    } else {
-                        all.push(tok.to_string());
-                    }
-                }
-                return Ok((sel, all));
+            if e.path().join("charge_types").is_file() {
+                return Ok(e.path());
             }
         }
         Err(HwError::Unavailable(
             "no BAT*/charge_types (uniwill-laptop charging interface)".into(),
         ))
+    }
+
+    /// `(selected, available)` charge profiles from `charge_types`.
+    /// Format: `Trickle [Standard] Long_Life`.
+    pub fn charge_types(&self) -> HwResult<(String, Vec<String>)> {
+        Ok(parse_charge_types(&read_sysfs(
+            &Self::battery_dir()?.join("charge_types"),
+        )?))
+    }
+
+    /// The battery as the window shows it: the charge profile and the readings around it.
+    pub fn battery(&self) -> HwResult<Battery> {
+        let dir = Self::battery_dir()?;
+        let read = |name: &str| read_sysfs(&dir.join(name)).ok();
+        let (selected, available) = parse_charge_types(&read("charge_types").unwrap_or_default());
+        Ok(Battery {
+            selected,
+            available,
+            status: read("status").unwrap_or_default(),
+            health: read("health").unwrap_or_default(),
+            capacity: read("capacity").and_then(|v| v.trim().parse().ok()),
+            current_ua: read("current_now").and_then(|v| v.trim().parse().ok()),
+        })
     }
 
     /// Write a charge profile (`Standard` / `Trickle` / `Long_Life`).
@@ -834,17 +903,7 @@ impl SysfsEc {
         if sel == target {
             return Ok(());
         }
-        let bat = std::path::Path::new("/sys/class/power_supply");
-        for e in std::fs::read_dir(bat)
-            .map_err(|e| HwError::Other(format!("power_supply: {e}")))?
-            .flatten()
-        {
-            let f = e.path().join("charge_types");
-            if f.is_file() {
-                return write_sysfs(&f, &target);
-            }
-        }
-        Err(HwError::Unavailable("charge_types disappeared".into()))
+        write_sysfs(&Self::battery_dir()?.join("charge_types"), &target)
     }
 
     // ------------------------------------------------------- platform attrs
@@ -933,6 +992,18 @@ impl EcAccess for SysfsEc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn charge_types_name_the_selected_one_and_the_table_names_all_three() {
+        let (sel, all) = parse_charge_types("Trickle [Standard] Long_Life\n");
+        assert_eq!(sel, "Standard");
+        assert_eq!(all, ["Trickle", "Standard", "Long_Life"]);
+        // every profile the window offers is one the kernel lists, spelled the way it does
+        for p in &CHARGE_PROFILES {
+            assert!(all.iter().any(|a| a == p.kernel), "{}", p.kernel);
+        }
+        assert_eq!(parse_charge_types(""), (String::new(), vec![]));
+    }
 
     #[test]
     fn auto_boot_and_powershare_exclude_each_other() {
