@@ -884,28 +884,6 @@ fn open_waiting<T>(mut open: impl FnMut() -> HwResult<T>, pause: std::time::Dura
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_device_that_appears_late_is_waited_for() {
-        let mut tries = 0;
-        let got = open_waiting(
-            || {
-                tries += 1;
-                if tries < 3 {
-                    Err(HwError::Unavailable("not there yet".into()))
-                } else {
-                    Ok(tries)
-                }
-            },
-            std::time::Duration::ZERO,
-        );
-        assert_eq!(got, 3);
-    }
-}
-
 fn fan_mode_name(b: u8) -> &'static str {
     match b {
         0x00 => "normal",
@@ -1561,5 +1539,27 @@ fn ec_cmd(cli: &Cli, cmd: &EcCmd) -> CmdResult {
             );
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_device_that_appears_late_is_waited_for() {
+        let mut tries = 0;
+        let got = open_waiting(
+            || {
+                tries += 1;
+                if tries < 3 {
+                    Err(HwError::Unavailable("not there yet".into()))
+                } else {
+                    Ok(tries)
+                }
+            },
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(got, 3);
     }
 }
