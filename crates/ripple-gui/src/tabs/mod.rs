@@ -1,0 +1,7 @@
+//! One file per tab; each adds its `fn <tab>_tab` to `Ui`.
+
+mod fan;
+mod keyboard;
+mod profiles;
+mod settings;
+mod system;
