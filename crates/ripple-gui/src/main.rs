@@ -788,6 +788,31 @@ fn button(
         .child(label.into())
 }
 
+/// On/off switch: a track with a knob that sits right when on (gpui has no switch of its own).
+fn switch(p: Palette, id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .w(px(36.))
+        .h(px(20.))
+        .p(px(2.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(if on { p.accent } else { p.border }))
+        .bg(rgb(if on { p.accent_bg } else { p.panel }))
+        .when(on, |d| d.justify_end())
+        .hover(move |s| s.bg(rgb(p.hover)))
+        .cursor_pointer()
+        .child(
+            div()
+                .size(px(14.))
+                .rounded_full()
+                .bg(rgb(if on { p.accent } else { p.muted })),
+        )
+}
+
 fn section(p: Palette, title: &str) -> Div {
     div()
         .flex()
@@ -1675,12 +1700,10 @@ impl Ui {
                     "Notify when a toggle, the performance profile or fan boost changes.",
                 )))
                 .child(
-                    button(p, "popup-toggle", if popups { "On" } else { "Off" }, popups).on_click(
-                        cx.listener(|ui, _, _, cx| {
-                            ui.settings.popups = !ui.settings.popups;
-                            ui.save_settings(cx);
-                        }),
-                    ),
+                    switch(p, "popup-toggle", popups).on_click(cx.listener(|ui, _, _, cx| {
+                        ui.settings.popups = !ui.settings.popups;
+                        ui.save_settings(cx);
+                    })),
                 ),
         );
         if s.toggles.is_empty() {
@@ -1712,13 +1735,9 @@ impl Ui {
                             )
                             .child(note(p, describe(name))),
                     )
-                    .child(
-                        button(p, ("toggle", i), if on { "On" } else { "Off" }, on).on_click(
-                            cx.listener(move |ui, _, _, cx| {
-                                ui.act(cx, move |hw| hw.set_toggle(name, !on))
-                            }),
-                        ),
-                    ),
+                    .child(switch(p, ("toggle", i), on).on_click(cx.listener(
+                        move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on)),
+                    ))),
             );
         }
 
@@ -1887,7 +1906,7 @@ impl Ui {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(button(p, "autostart", if self.autostart { "On" } else { "Off" }, self.autostart).on_click(cx.listener(|ui, _, _, cx| ui.toggle_autostart(cx))))
+                    .child(switch(p, "autostart", self.autostart).on_click(cx.listener(|ui, _, _, cx| ui.toggle_autostart(cx))))
                     .child("Open at login"),
             )
             .child(
@@ -1895,7 +1914,7 @@ impl Ui {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(button(p, "start-min", if self.settings.start_minimized { "On" } else { "Off" }, self.settings.start_minimized).on_click(cx.listener(|ui, _, _, cx| ui.toggle_start_minimized(cx))))
+                    .child(switch(p, "start-min", self.settings.start_minimized).on_click(cx.listener(|ui, _, _, cx| ui.toggle_start_minimized(cx))))
                     .child("Start minimized"),
             )
             .child(note(p, "Open at login starts the app at login: the window and the tray icon (no password: the sudoers rule from install.sh, else polkit asks). Start minimized starts only the tray icon, which opens the window. The service always starts at boot."));
