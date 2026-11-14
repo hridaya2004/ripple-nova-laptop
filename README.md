@@ -70,7 +70,7 @@ on a real laptop.
   on, only the tray icon starts and the window opens from it. The service always starts at boot, whatever these say.
 - **CLI** for all of the above, plus battery charge *profiles* (Standard / Trickle / Long Life).
 
-**Not implemented:**
+**To implement:**
 
 | Feature | State |
 |---|---|
@@ -79,7 +79,8 @@ on a real laptop.
 | Touchpad double-tap toggle and its LED | investigated, unsolved (the double tap does nothing on Linux; Windows does it in software) |
 | Keyboard: per-zone colours, other effects, a moving rainbow, music mode, saved effects | not started (the EC only gave a static rainbow) |
 | Lightbar | this laptop has none (the kernel exposes one anyway; the controls are hidden) |
-| Display refresh rate, display colour profiles, dGPU power / mux mode | not started |
+| Display refresh rate (needs kscreen-doctor, xrandr or wlr-randr), display colour profiles, dGPU power / mux mode | not started. dGPU power needs a verified ACPI `_OFF`/`_ON` pair first: a wrong `_OFF` is risky, so it is not wired |
+| CPU thermal offset (TCC, EC 2008 holds the Gaming default, 2009 and 2010 the others) | read-only knowledge; writing it is not done. The stock service only writes it in a variant of this EC (0x786) that this model may not have |
 | GPU Dynamic Boost; checking the cTGP effect | cTGP is written but unobservable under nouveau; needs the NVIDIA driver |
 | OSD, per-app profiles, process control, keyboard remap, gaming monitor, liquid cooling (Oasis) | OEM features, not planned yet |
 | Windows backend, MQTT interop with the OEM UI | out of scope for now |

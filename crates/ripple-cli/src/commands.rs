@@ -10,8 +10,8 @@ use ripple_hw::control::{self, Config, Hsv, Preset, Profile};
 use ripple_hw::{EcAccess, HwError, HwResult};
 
 use crate::{
-    Backend, BatteryCmd, Cli, CurveCmd, CustomFanCmd, DisplayCmd, EcCmd, FanCmd, ModeChoice,
-    ModeCmd, PowerCmd, ProfileChoice, RgbCmd, SystemCmd,
+    Backend, BatteryCmd, Cli, CurveCmd, CustomFanCmd, EcCmd, FanCmd, ModeChoice, ModeCmd, PowerCmd,
+    ProfileChoice, RgbCmd, SystemCmd,
 };
 
 pub type CmdResult = Result<(), String>;
@@ -27,7 +27,6 @@ pub fn run(cli: &Cli) -> CmdResult {
         crate::Command::Power { cmd } => power(cli, cmd),
         crate::Command::Rgb { cmd } => rgb(cli, cmd),
         crate::Command::Battery { cmd } => battery(cli, cmd),
-        crate::Command::Display { cmd } => display(cli, cmd),
         crate::Command::System { cmd } => system(cli, cmd),
         crate::Command::Touchpad { state } => touchpad(*state),
         crate::Command::Popups { state } => popups(*state),
@@ -312,7 +311,7 @@ fn doctor(cli: &Cli) -> CmdResult {
 
     println!("\nRGB solution:");
     match &hid_res {
-        Ok(v) => println!("  {v} → hidraw backend (not implemented yet)"),
+        Ok(v) => println!("  {v} → a HID RGB device (only the EC solution is supported)"),
         Err(e) => println!("  {e} → EC-solution RGB likely (registers 1897-1902)"),
     }
 
@@ -1168,16 +1167,6 @@ fn power(cli: &Cli, cmd: &PowerCmd) -> CmdResult {
             );
             Ok(())
         }
-        PowerCmd::Tcc { offset } => {
-            if !(-30..=0).contains(offset) {
-                return Err(format!("TCC offset {offset} out of range -30..=0"));
-            }
-            // Not written to the mode-specific default register yet; for now
-            // record intent and write the gaming default as a stand-in.
-            println!("TCC offset {offset}°C — writing it is not implemented yet");
-            let _ = ec.read(addr::GAMING_TCC_OFFSET_DEFAULT)?;
-            Ok(())
-        }
     }
 }
 
@@ -1408,32 +1397,6 @@ fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
             let (_sel, all) = u.charge_types()?;
             u.set_charge_types(want)?;
             println!("charge profile → {want} (available: {})", all.join(", "));
-            Ok(())
-        }
-    }
-}
-
-fn display(_cli: &Cli, cmd: &DisplayCmd) -> CmdResult {
-    match cmd {
-        DisplayCmd::Refresh => {
-            for tool in ["kscreen-doctor", "xrandr", "wlr-randr"] {
-                let found = std::process::Command::new("which")
-                    .arg(tool)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                println!("  {tool:14}: {}", if found { "found" } else { "missing" });
-            }
-            println!("(rate listing is not implemented yet)");
-            Ok(())
-        }
-        DisplayCmd::Dgpu { state } => {
-            // Deliberately NOT executed automatically — ACPI _OFF on dGPU is
-            // risky (needs a verified _OFF/_ON pair).
-            println!(
-                "dGPU power {} — ACPI _OFF path is not wired yet",
-                if state.as_bool() { "on" } else { "off" }
-            );
             Ok(())
         }
     }

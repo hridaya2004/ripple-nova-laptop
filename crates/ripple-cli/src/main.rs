@@ -92,7 +92,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: FanCmd,
     },
-    /// Power limits: PL1/PL2/TCC
+    /// Power limits: PL1/PL2
     Power {
         #[command(subcommand)]
         cmd: PowerCmd,
@@ -106,11 +106,6 @@ pub enum Command {
     Battery {
         #[command(subcommand)]
         cmd: BatteryCmd,
-    },
-    /// Display refresh rate / dGPU power
-    Display {
-        #[command(subcommand)]
-        cmd: DisplayCmd,
     },
     /// Touchpad power: `off` powers it down (no pointer, the touchpad LED lights, as in suspend), `on` powers it up
     ///
@@ -214,7 +209,8 @@ pub enum ModeChoice {
 
 #[derive(Subcommand)]
 pub enum FanCmd {
-    /// Show fan table profiles / curves
+    /// Developer tool: read the fan tables of an OEM package (needs --oem-dir; this model has none)
+    #[command(hide = true)]
     Curve {
         #[command(subcommand)]
         cmd: CurveCmd,
@@ -298,14 +294,12 @@ pub enum CurveCmd {
 
 #[derive(Subcommand)]
 pub enum PowerCmd {
-    /// Show current PL1/PL2/TCC (EC read)
+    /// Show current PL1/PL2 (EC read)
     Get,
     /// Set PL1 in watts (5..=80, the highest stock value for this machine)
     Pl1 { watts: u16 },
     /// Set PL2 in watts (5..=80)
     Pl2 { watts: u16 },
-    /// Set TCC offset in °C (-30..=0)
-    Tcc { offset: i8 },
 }
 
 #[derive(Subcommand)]
@@ -366,17 +360,6 @@ pub enum ProfileChoice {
     Trickle,
     /// charge_types: longevity profile
     LongLife,
-}
-
-#[derive(Subcommand)]
-pub enum DisplayCmd {
-    /// List available refresh-rate tools (kscreen-doctor/xrandr/wlr-randr)
-    Refresh,
-    /// dGPU power: on|off
-    Dgpu {
-        #[arg(value_enum)]
-        state: OnOff,
-    },
 }
 
 #[derive(Subcommand)]
