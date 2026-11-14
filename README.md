@@ -49,7 +49,7 @@ on a real laptop.
   points each at 45/55/65/75/85 °C (dragged on a chart in the window), independent of the profile, switchable off any time, with a default preset and
   failsafes (see [fans](#custom-fan-profile)). Plus an auto-boost threshold in the window.
 - **Keyboard backlight** (EC solution): colour (hue/saturation/brightness), static rainbow, off.
-- **Platform toggles**: Fn lock, Super key and a **Touchpad power** switch (off = the touchpad is powered down: no
+- **Platform toggles** (System tab): Fn lock, Super key and the others below. The **Device** tab has the touchpad: a **Touchpad power** switch (off = the touchpad is powered down: no
   pointer, its LED lights, as it does in suspend; bring it back with the toggle or `sudo -n rcc touchpad on|toggle`,
   which the sudoers rule allows without a password, for instance from a keyboard shortcut). AC Auto-Boot, USB
   powershare, the firmware's Touchpad toggle and Touchpad power are marked *experimental*. Breathing in suspend is a

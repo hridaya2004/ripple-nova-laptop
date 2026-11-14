@@ -124,6 +124,7 @@ impl Start {
         {
             Some("fan") => Tab::Fan,
             Some("keyboard") => Tab::Keyboard,
+            Some("device") => Tab::Device,
             Some("system") => Tab::System,
             Some("settings") => Tab::Settings,
             _ => Tab::Profiles,
@@ -150,6 +151,7 @@ enum Tab {
     Profiles,
     Fan,
     Keyboard,
+    Device,
     System,
     Settings,
 }
@@ -923,6 +925,28 @@ fn paint_chart(
     }
 }
 
+/// The toggles that belong to the Device tab: the touchpad's power switch and the firmware's own toggle.
+const DEVICE_TOGGLES: [&str; 2] = ["touchpad", "touchpad_toggle_enable"];
+
+fn toggle_description(name: &str) -> &str {
+    match name {
+        "fn_lock" => "F-keys act as media keys unless Fn is held",
+        "super_key_enable" => "The Super (Windows) key works",
+        "ac_auto_boot" => "Power on when AC is plugged in (enabling it turns USB powershare off)",
+        "usb_powershare_high" => {
+            "Keep the USB ports powered when off (enabling it turns AC auto-boot off)"
+        }
+        "touchpad" => "Off powers the touchpad down: no pointer, its LED lights (as in suspend)",
+        "breathing_in_suspend" => {
+            "Breathing LED animation while suspended on AC power (a lightbar feature)"
+        }
+        "touchpad_toggle_enable" => {
+            "The firmware's own touchpad toggle; no effect seen on this laptop"
+        }
+        _ => "",
+    }
+}
+
 fn section(p: Palette, title: &str) -> Div {
     div()
         .flex()
@@ -1137,6 +1161,7 @@ impl Ui {
             (Tab::Profiles, "Profiles"),
             (Tab::Fan, "Fan"),
             (Tab::Keyboard, "Keyboard"),
+            (Tab::Device, "Device"),
             (Tab::System, "System"),
             (Tab::Settings, "Settings"),
         ];
@@ -1870,31 +1895,76 @@ impl Ui {
             .into_any_element()
     }
 
+    /// One platform toggle: its name (and "experimental" when its effect is not established), what it
+    /// does, and a switch. `i` is its place in the snapshot's toggle list.
+    fn toggle_row(&self, cx: &mut Context<Self>, i: usize, name: &'static str, on: bool) -> Div {
+        let p = self.p();
+        div()
+            .flex()
+            .justify_between()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(toggle_label(name))
+                            .when(is_experimental(name), |d| {
+                                d.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(p.muted))
+                                        .child("experimental"),
+                                )
+                            }),
+                    )
+                    .child(note(p, toggle_description(name))),
+            )
+            .child(switch(p, ("toggle", i), on).on_click(
+                cx.listener(move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on))),
+            ))
+    }
+
+    /// The touchpad: its power switch and the firmware's own toggle.
+    fn device_tab(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.p();
+        let mine = self
+            .snap
+            .toggles
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, (n, _))| DEVICE_TOGGLES.contains(n))
+            .collect::<Vec<_>>();
+        let mut touchpad = section(p, "Touchpad");
+        if mine.is_empty() {
+            touchpad = touchpad.child(note(
+                p,
+                "No Uniwill touchpad found (no i2c-UNIW* device, and no touchpad toggle in the kernel driver here).",
+            ));
+        } else {
+            for (i, (name, on)) in mine {
+                touchpad = touchpad.child(self.toggle_row(cx, i, name, on));
+            }
+            touchpad = touchpad.child(note(
+                p,
+                "With the touchpad off there is no pointer: `sudo -n rcc touchpad toggle`, bound to a keyboard shortcut, brings it back.",
+            ));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(touchpad)
+            .into_any_element()
+    }
+
     fn system_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p();
         let s = &self.snap;
-        fn describe(name: &str) -> &str {
-            match name {
-                "fn_lock" => "F-keys act as media keys unless Fn is held",
-                "super_key_enable" => "The Super (Windows) key works",
-                "ac_auto_boot" => {
-                    "Power on when AC is plugged in (enabling it turns USB powershare off)"
-                }
-                "usb_powershare_high" => {
-                    "Keep the USB ports powered when off (enabling it turns AC auto-boot off)"
-                }
-                "touchpad" => {
-                    "Off powers the touchpad down: no pointer, its LED lights (as in suspend)"
-                }
-                "breathing_in_suspend" => {
-                    "Breathing LED animation while suspended on AC power (a lightbar feature)"
-                }
-                "touchpad_toggle_enable" => {
-                    "The firmware's own touchpad toggle; no effect seen on this laptop"
-                }
-                _ => "",
-            }
-        }
         let mut toggles = section(p, "Toggles");
         let popups = self.settings.popups;
         toggles = toggles.child(
@@ -1914,39 +1984,18 @@ impl Ui {
                     })),
                 ),
         );
-        if s.toggles.is_empty() {
+        let system_toggles = s
+            .toggles
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, (n, _))| !DEVICE_TOGGLES.contains(n))
+            .collect::<Vec<_>>();
+        if system_toggles.is_empty() {
             toggles = toggles.child(note(p, "none"));
         }
-        for (i, (name, on)) in s.toggles.iter().copied().enumerate() {
-            toggles = toggles.child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .gap_4()
-                    .child(
-                        div()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(toggle_label(name))
-                                    .when(is_experimental(name), |d| {
-                                        d.child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(rgb(p.muted))
-                                                .child("experimental"),
-                                        )
-                                    }),
-                            )
-                            .child(note(p, describe(name))),
-                    )
-                    .child(switch(p, ("toggle", i), on).on_click(cx.listener(
-                        move |ui, _, _, cx| ui.act(cx, move |hw| hw.set_toggle(name, !on)),
-                    ))),
-            );
+        for (i, (name, on)) in system_toggles {
+            toggles = toggles.child(self.toggle_row(cx, i, name, on));
         }
 
         let mut page = div().flex().flex_col().gap_3().child(toggles);
@@ -2164,6 +2213,7 @@ impl Render for Ui {
             Tab::Profiles => self.profiles_tab(cx),
             Tab::Fan => self.fan_tab(cx),
             Tab::Keyboard => self.keyboard_tab(cx),
+            Tab::Device => self.device_tab(cx),
             Tab::System => self.system_tab(cx),
             Tab::Settings => self.settings_tab(cx),
         };
