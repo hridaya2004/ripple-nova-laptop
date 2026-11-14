@@ -68,18 +68,19 @@ on a real laptop.
   colour, no password prompt. Closing the window ends it; the tray icon opens it again.
 - **Startup**: *Open at login* (Settings) starts the window and the tray icon when you log in; with *Start minimized*
   on, only the tray icon starts and the window opens from it. The service always starts at boot, whatever these say.
-- **Battery** tab (and `rcc battery`): the three charging profiles of the EC. The names are the kernel's with the OEM's
-  in brackets, and they follow the OEM's own descriptions and EC values (0, 1, 2): *Standard* (High capacity),
-  *Long life* (Balanced: speed and peak capacity slightly reduced), *Trickle* (Eco, "healthy": reduced even more,
-  for laptops that stay on external power). The tab also shows charge, status, health and the current: with a profile
-  other than Standard the firmware can report Full or Charging while no current flows, so trust the current.
+- **Battery** tab (and `rcc battery`): the battery charge mode, one of the types the kernel lists in `charge_types`
+  (`Trickle`, `Standard`, `Long_Life`). The descriptions use the OEM's words and names, which match the EC values
+  (0, 1, 2): *Standard* is High capacity, *Long life* is Balanced (speed and peak capacity slightly reduced),
+  *Trickle* is Eco, "healthy" (reduced even more, for laptops that stay on external power). The tab also shows
+  charge, status, health and the current: with a mode other than Standard the firmware can report Full or Charging
+  while no current flows, so trust the current.
 - **CLI** for all of the above.
 
 **To implement:**
 
 | Feature | State |
 |---|---|
-| Battery charge *limit* (EC 1977/2000) | parked on purpose; only the three charge profiles exist |
+| Battery charge *limit* (EC 1977/2000) | parked on purpose; only the three battery charge modes exist |
 | EC fan *curve tables* and the OEM per-model `UserFanTables` | blocked: this model has no OEM tables and its EC curve RAM reads empty. The custom fan profile is software-driven instead |
 | Touchpad double-tap toggle and its LED | investigated, unsolved (the double tap does nothing on Linux; Windows does it in software) |
 | Keyboard: per-zone colours, other effects, a moving rainbow, music mode, saved effects | not started (the EC only gave a static rainbow) |

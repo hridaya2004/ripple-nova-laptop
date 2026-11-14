@@ -39,7 +39,7 @@ pub enum Backend {
     Acpi,
     /// WMBC GetSetULong via /proc/acpi/call (needs sudo)
     Wmi,
-    /// uniwill-laptop kernel driver (sensors, lightbar, charge profiles)
+    /// uniwill-laptop kernel driver (sensors, lightbar, battery charge modes)
     Sysfs,
 }
 
@@ -102,7 +102,7 @@ pub enum Command {
         #[command(subcommand)]
         cmd: RgbCmd,
     },
-    /// Battery charge profile (charge limits are a TODO)
+    /// Battery charge mode (charge limits are a TODO)
     Battery {
         #[command(subcommand)]
         cmd: BatteryCmd,
@@ -330,12 +330,12 @@ pub enum RgbCmd {
 
 #[derive(Subcommand)]
 pub enum BatteryCmd {
-    /// Show the current charge profile
+    /// Show the current battery charge mode
     Get,
     // TODO(charge-limit): parked for now, see commands.rs `battery`.
     // /// Set charge limit 0..=100 (EC registers; kernel threshold attr if present)
     // ChargeLimit { percent: u8 },
-    /// Set protection/charge profile
+    /// Set the battery charge mode
     ///
     /// OEM names map onto the kernel `charge_types` interface:
     /// performance→Standard, balanced→Long_Life, healthy→Trickle

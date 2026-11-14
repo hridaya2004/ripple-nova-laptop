@@ -59,7 +59,7 @@ pub struct Snapshot {
     pub kb_level: u8,
     pub hsv: Hsv,
     pub toggles: Vec<(&'static str, bool)>,
-    /// The battery's charge profile and readings; `None` without the uniwill driver.
+    /// The battery's charge mode and readings; `None` without the uniwill driver.
     pub battery: Option<Battery>,
     /// Is the hardware mode button being followed, and by the systemd service rather than by us?
     pub button: bool,
@@ -615,7 +615,7 @@ impl Hw {
         ))
     }
 
-    /// Choose the charging profile (`Standard`, `Long_Life` or `Trickle`, the kernel's names).
+    /// Choose the battery charge mode (`Standard`, `Long_Life` or `Trickle`, the kernel's names).
     pub fn set_charge_type(&self, kernel: &'static str) -> Result<String, String> {
         let u = self
             .sysfs
@@ -626,7 +626,7 @@ impl Hw {
             .iter()
             .find(|p| p.kernel == kernel)
             .map_or(kernel, |p| p.label);
-        Ok(format!("charging profile → {label}"))
+        Ok(format!("battery charge mode → {label}"))
     }
 
     pub fn set_lightbar(&self, rgb: Option<(u8, u8, u8)>) -> Result<String, String> {

@@ -490,7 +490,7 @@ fn status(cli: &Cli) -> CmdResult {
     // TODO(charge-limit): show EC charge limit (BATTERY_CHARGE_LIMIT_UP) once charge limits are wanted again.
     if let Some(u) = &sysfs {
         if let Ok((sel, all)) = u.charge_types() {
-            println!("  charge profile  : {sel} (available: {})", all.join(", "));
+            println!("  charge mode     : {sel} (available: {})", all.join(", "));
         }
         if let Ok(bat) = std::fs::read_to_string("/sys/class/power_supply/BAT0/status") {
             println!("  status          : {}", bat.trim());
@@ -1358,12 +1358,12 @@ fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
     // TODO(charge-limit): `battery charge-limit <percent>` and the EC limit reads
     // (BATTERY_CHARGE_LIMIT_UP/DOWN, 1977/2000) are parked; add back with
     // `BatteryCmd::ChargeLimit` in main.rs when wanted.
-    let u =
-        uniwill(cli).map_err(|e| format!("charge profiles need the uniwill kernel driver: {e}"))?;
+    let u = uniwill(cli)
+        .map_err(|e| format!("battery charge modes need the uniwill kernel driver: {e}"))?;
     match cmd {
         BatteryCmd::Get => {
             let (sel, all) = u.charge_types()?;
-            println!("charge profile: {sel} (available: {})", all.join(", "));
+            println!("battery charge mode: {sel} (available: {})", all.join(", "));
             Ok(())
         }
         BatteryCmd::Profile { profile } => {
@@ -1375,7 +1375,10 @@ fn battery(cli: &Cli, cmd: &BatteryCmd) -> CmdResult {
             };
             let (_sel, all) = u.charge_types()?;
             u.set_charge_types(want)?;
-            println!("charge profile → {want} (available: {})", all.join(", "));
+            println!(
+                "battery charge mode → {want} (available: {})",
+                all.join(", ")
+            );
             Ok(())
         }
     }

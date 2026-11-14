@@ -533,7 +533,7 @@ pub struct SysfsEc {
     platform: Option<std::path::PathBuf>,
 }
 
-/// The three charging profiles of the EC, by the kernel's `charge_types` name, with the OEM's own name and
+/// The three battery charge modes of the EC, by the kernel's `charge_types` name, with the OEM's own name and
 /// words for each (its strings: "High Capacity", "Balanced" and "Eco" modes, EC values 0, 1 and 2). The
 /// driver reads 0 as Standard, 1 as Long_Life and 2 as Trickle.
 pub struct ChargeProfile {
@@ -564,7 +564,7 @@ pub const CHARGE_PROFILES: [ChargeProfile; 3] = [
     },
 ];
 
-/// The battery's charge profile and readings.
+/// The battery's charge mode and readings.
 #[derive(Debug, Clone, Default)]
 pub struct Battery {
     /// The `charge_types` choice, as the kernel names it (`Standard`, `Long_Life`, `Trickle`).
@@ -863,7 +863,7 @@ impl SysfsEc {
         ))
     }
 
-    /// `(selected, available)` charge profiles from `charge_types`.
+    /// `(selected, available)` battery charge modes from `charge_types`.
     /// Format: `Trickle [Standard] Long_Life`.
     pub fn charge_types(&self) -> HwResult<(String, Vec<String>)> {
         Ok(parse_charge_types(&read_sysfs(
@@ -871,7 +871,7 @@ impl SysfsEc {
         )?))
     }
 
-    /// The battery as the window shows it: the charge profile and the readings around it.
+    /// The battery as the window shows it: the charge mode and the readings around it.
     pub fn battery(&self) -> HwResult<Battery> {
         let dir = Self::battery_dir()?;
         let read = |name: &str| read_sysfs(&dir.join(name)).ok();
@@ -886,7 +886,7 @@ impl SysfsEc {
         })
     }
 
-    /// Write a charge profile (`Standard` / `Trickle` / `Long_Life`).
+    /// Write a battery charge mode (`Standard` / `Trickle` / `Long_Life`).
     pub fn set_charge_types(&self, want: &str) -> HwResult<()> {
         let (sel, all) = self.charge_types()?;
         let norm = |s: &str| s.to_ascii_lowercase().replace('-', "_");
@@ -896,7 +896,7 @@ impl SysfsEc {
             .cloned()
             .ok_or_else(|| {
                 HwError::Other(format!(
-                    "unknown charge profile '{want}' (available: {})",
+                    "unknown battery charge mode '{want}' (available: {})",
                     all.join(", ")
                 ))
             })?;
