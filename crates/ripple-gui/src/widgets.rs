@@ -47,17 +47,21 @@ pub(crate) fn switch(p: Palette, id: impl Into<ElementId>, on: bool) -> Stateful
         )
 }
 
+/// A group of settings: a soft card (no outline, the colour sets it off) under a small heading.
 pub(crate) fn section(p: Palette, title: &str) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap_2()
-        .p_3()
-        .rounded_md()
+        .gap_3()
+        .p_4()
+        .rounded_lg()
         .bg(rgb(p.panel))
-        .border_1()
-        .border_color(rgb(p.border))
-        .child(div().text_color(rgb(p.muted)).child(title.to_uppercase()))
+        .child(
+            div()
+                .text_size(px(TEXT_CAPTION))
+                .text_color(rgb(p.muted))
+                .child(title.to_uppercase()),
+        )
 }
 
 pub(crate) fn row(

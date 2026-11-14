@@ -98,26 +98,49 @@ impl Ui {
             )
             .child(note(p, "Auto: the firmware's own curve. Custom: your curves for the running profile below, any time. Boost: both fans at full speed."));
 
-        // temperatures left, fans right: both are what you look at while changing the mode below
-        let column = || div().flex().flex_col().flex_1().gap_1();
-        let temps = s.temps.iter().fold(column(), |c, (l, t)| {
-            c.child(row(p, l.clone(), format!("{t:.1} °C")))
-        });
-        let rpms = s.fans.iter().fold(column(), |c, (l, rpm, duty)| {
-            c.child(row(
-                p,
+        // one tile per reading, wrapping when the window is narrow: what you watch while changing the mode
+        let tile = |label: String, value: String| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(150.))
+                .gap_1()
+                .p_3()
+                .rounded_md()
+                .bg(rgb(p.bg))
+                .child(
+                    div()
+                        .text_size(px(TEXT_CAPTION))
+                        .text_color(rgb(p.muted))
+                        .child(label),
+                )
+                .child(div().child(value))
+        };
+        let temps = s
+            .temps
+            .iter()
+            .map(|(l, t)| tile(l.clone(), format!("{t:.1} °C")));
+        let rpms = s.fans.iter().map(|(l, rpm, duty)| {
+            tile(
                 l.clone(),
                 format!(
                     "{rpm} rpm{}",
                     duty.map(|d| format!("  ({d} %)")).unwrap_or_default()
                 ),
-            ))
+            )
         });
         let mut fans = section(p, "Sensors");
         fans = if s.temps.is_empty() && s.fans.is_empty() {
             fans.child(note(p, "No hwmon sensors (kernel driver not loaded?)."))
         } else {
-            fans.child(div().flex().gap_6().child(temps).child(rpms))
+            fans.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(temps.chain(rpms).collect::<Vec<_>>()),
+            )
         };
 
         // Off, then 60..=95 °C in 5 °C steps.

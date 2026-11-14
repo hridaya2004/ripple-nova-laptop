@@ -77,25 +77,28 @@ impl Ui {
             (Tab::System, "System"),
             (Tab::Settings, "Settings"),
         ];
+        // a flat strip: the open tab has an accent line under it, the others only a hover
         div()
             .flex()
-            .h(px(34.))
-            .bg(rgb(p.panel))
+            .h(px(36.))
+            .px_2()
+            .bg(rgb(p.bg))
             .border_b_1()
             .border_color(rgb(p.border))
             .children(tabs.map(|(tab, label)| {
                 let active = self.tab == tab;
                 div()
                     .id(label)
-                    .px_4()
+                    .px_3()
                     .flex()
                     .items_center()
                     .cursor_pointer()
-                    .border_r_1()
-                    .border_color(rgb(p.border))
-                    .when(active, |d| d.bg(rgb(p.bg)).text_color(rgb(p.fg)))
+                    .border_b_2()
+                    .border_color(rgb(if active { p.accent } else { p.bg }))
+                    .when(active, |d| d.text_color(rgb(p.fg)))
                     .when(!active, |d| {
-                        d.text_color(rgb(p.muted)).hover(|s| s.bg(rgb(p.hover)))
+                        d.text_color(rgb(p.muted))
+                            .hover(|s| s.text_color(rgb(p.fg)))
                     })
                     .on_click(cx.listener(move |ui, _, window, cx| {
                         ui.tab = tab;
