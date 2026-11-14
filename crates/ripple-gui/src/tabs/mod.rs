@@ -2,6 +2,7 @@
 
 mod battery;
 mod fan;
+mod graphics;
 mod keyboard;
 mod profiles;
 mod settings;

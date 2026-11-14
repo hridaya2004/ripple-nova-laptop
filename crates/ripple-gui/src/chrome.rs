@@ -69,7 +69,7 @@ impl Ui {
 
     pub(crate) fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.p();
-        let tabs = [
+        let mut tabs = vec![
             (Tab::Profiles, "Profiles"),
             (Tab::Fan, "Fan"),
             (Tab::Keyboard, "Keyboard"),
@@ -78,6 +78,10 @@ impl Ui {
             (Tab::System, "System"),
             (Tab::Settings, "Settings"),
         ];
+        // only with NVIDIA's driver: nouveau has nothing to show or set
+        if self.snap.gpu.is_some() {
+            tabs.insert(2, (Tab::Graphics, "Graphics"));
+        }
         // a flat strip: the open tab has an accent line under it, the others only a hover
         div()
             .flex()
@@ -86,7 +90,7 @@ impl Ui {
             .bg(rgb(p.bg))
             .border_b_1()
             .border_color(rgb(p.border))
-            .children(tabs.map(|(tab, label)| {
+            .children(tabs.into_iter().map(|(tab, label)| {
                 let active = self.tab == tab;
                 div()
                     .id(label)

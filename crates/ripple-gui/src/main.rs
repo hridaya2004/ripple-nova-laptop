@@ -73,6 +73,7 @@ impl Start {
         {
             Some("fan") => Tab::Fan,
             Some("keyboard") => Tab::Keyboard,
+            Some("graphics") => Tab::Graphics,
             Some("battery") => Tab::Battery,
             Some("device") => Tab::Device,
             Some("system") => Tab::System,
@@ -100,6 +101,7 @@ impl Start {
 enum Tab {
     Profiles,
     Fan,
+    Graphics,
     Keyboard,
     Battery,
     Device,
@@ -560,6 +562,7 @@ impl Render for Ui {
             Tab::Profiles => self.profiles_tab(cx),
             Tab::Fan => self.fan_tab(cx),
             Tab::Keyboard => self.keyboard_tab(cx),
+            Tab::Graphics => self.graphics_tab(cx),
             Tab::Battery => self.battery_tab(cx),
             Tab::Device => self.device_tab(cx),
             Tab::System => self.system_tab(cx),

@@ -5,6 +5,7 @@
 use ripple_core::modes::OperatingMode;
 use ripple_core::regs::addr;
 use ripple_hw::control::{self, Config, CustomProfile, FanCurves, FanSet, Hsv, Preset, Profile};
+use ripple_hw::gpu::{Gpu, GpuStatus, GpuTune};
 use ripple_hw::linux::{self, Battery, SysfsEc};
 use ripple_hw::EcAccess;
 
@@ -21,6 +22,13 @@ pub enum Field {
     Pl2,
     Pl4,
     Ctgp,
+}
+
+/// The NVIDIA GPU as the window shows it, and the offsets saved for it.
+#[derive(Clone)]
+pub struct GpuView {
+    pub status: GpuStatus,
+    pub tune: GpuTune,
 }
 
 #[derive(Clone)]
@@ -61,6 +69,8 @@ pub struct Snapshot {
     pub toggles: Vec<(&'static str, bool)>,
     /// The battery's charge mode and readings; `None` without the uniwill driver.
     pub battery: Option<Battery>,
+    /// The NVIDIA GPU; `None` without NVIDIA's driver (nouveau does not count): the Graphics tab is then hidden.
+    pub gpu: Option<GpuView>,
     /// Is the hardware mode button being followed, and by the systemd service rather than by us?
     pub button: bool,
     pub service: bool,
@@ -141,6 +151,7 @@ impl Default for Snapshot {
             },
             toggles: vec![],
             battery: None,
+            gpu: None,
             button: false,
             service: false,
             debug: String::new(),
@@ -149,10 +160,23 @@ impl Default for Snapshot {
     }
 }
 
+/// Change the saved GPU offsets under the config lock; refuses values outside the ranges.
+fn save_gpu(f: impl FnOnce(&mut GpuTune)) -> Result<GpuTune, String> {
+    Ok(Config::update(|c| {
+        let mut t = c.gpu;
+        f(&mut t);
+        t.validate()?;
+        c.gpu = t;
+        Ok(t)
+    })?)
+}
+
 pub struct Hw {
     ec: Option<Box<dyn EcAccess>>,
     ec_error: Option<String>,
     sysfs: Option<SysfsEc>,
+    /// NVML session; `None` without the NVIDIA driver.
+    gpu: Option<Gpu>,
     stock: [Preset; 3],
     model: String,
     /// Did the auto-boost policy (not the user) switch boost on?
@@ -189,6 +213,7 @@ impl Hw {
             ec,
             ec_error,
             sysfs,
+            gpu: Gpu::open().ok(),
             stock,
             model,
             ours: false,
@@ -285,6 +310,10 @@ impl Hw {
                 s.lightbar = u.lightbar().ok().map(|(r, g, b, _)| (r, g, b));
             }
             s.battery = u.battery().ok();
+            s.gpu = self.gpu.as_ref().map(|g| GpuView {
+                status: g.status(),
+                tune: cfg.gpu,
+            });
             // Only plain 0/1 attributes become toggles (which ones: `control::toggle_shown`).
             s.toggles = control::platform_toggles(u, s.has_lightbar);
         }
@@ -613,6 +642,44 @@ impl Hw {
             "keyboard: hue {} sat {} % brightness {} % (levels {},{},{})",
             hsv.h, hsv.s, hsv.v, l.0, l.1, l.2
         ))
+    }
+
+    /// Save the GPU clock offsets (`None` keeps that one), and apply them when they are switched on.
+    pub fn set_gpu_offsets(
+        &mut self,
+        core: Option<i32>,
+        mem: Option<i32>,
+    ) -> Result<String, String> {
+        let g = self.gpu.as_ref().ok_or("the NVIDIA driver is not loaded")?;
+        let t = save_gpu(|t| {
+            t.core_mhz = core.unwrap_or(t.core_mhz);
+            t.mem_mhz = mem.unwrap_or(t.mem_mhz);
+        })?;
+        if t.enabled {
+            g.apply(&t).map_err(|e| e.to_string())?;
+        }
+        Ok(format!(
+            "GPU offsets: core {:+} MHz, memory {:+} MHz{}",
+            t.core_mhz,
+            t.mem_mhz,
+            if t.enabled {
+                ""
+            } else {
+                " (saved, not applied)"
+            }
+        ))
+    }
+
+    /// Apply the saved GPU offsets, or give the GPU its own clocks back.
+    pub fn set_gpu_enabled(&mut self, on: bool) -> Result<String, String> {
+        let g = self.gpu.as_ref().ok_or("the NVIDIA driver is not loaded")?;
+        let t = save_gpu(|t| t.enabled = on)?;
+        g.apply(&t).map_err(|e| e.to_string())?;
+        Ok(if on {
+            "GPU offsets applied".into()
+        } else {
+            "GPU back to its own clocks".into()
+        })
     }
 
     /// Choose the battery charge mode (`Standard`, `Long_Life` or `Trickle`, the kernel's names).

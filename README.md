@@ -74,6 +74,10 @@ on a real laptop.
   *Trickle* is Eco, "healthy" (reduced even more, for laptops that stay on external power). The tab also shows
   charge, status, health and the current: with a mode other than Standard the firmware can report Full or Charging
   while no current flows, so trust the current.
+- **Graphics** tab (and `rcc gpu`), shown only when [the NVIDIA driver](#the-nvidia-driver) is loaded: the GPU's power
+  limit, temperature and clocks, and the core and memory clock offsets (core -200..200 MHz, memory -500..1000 MHz, in
+  steps of 10 and 50). They are off until you switch *Apply the offsets* on; off means the GPU's own clocks. The service puts
+  them back after a driver reload. cTGP stays per profile (Profiles tab); here you see the power limit it results in.
 - **CLI** for all of the above.
 
 **To implement:**
@@ -87,7 +91,7 @@ on a real laptop.
 | Lightbar | this laptop has none (the kernel exposes one anyway; the controls are hidden) |
 | Display refresh rate (needs kscreen-doctor, xrandr or wlr-randr), display colour profiles, dGPU power / mux mode | not started. dGPU power needs a verified ACPI `_OFF`/`_ON` pair first: a wrong `_OFF` is risky, so it is not wired |
 | CPU thermal offset (TCC, EC 2008 holds the Gaming default, 2009 and 2010 the others) | read-only knowledge; writing it is not done. The stock service only writes it in a variant of this EC (0x786) that this model may not have |
-| The OEM's "Graphics Card" options: GPU core and memory clock offsets, GPU temperature target, the Dynamic Boost switch and value, "Unlock Configurable TGP" | not started. The clock offsets and the temperature target go through NVIDIA's NVML library, so they need [the NVIDIA driver](#the-nvidia-driver) (to be shown only when it is installed). cTGP and Dynamic Boost are EC registers (0x743 bits, 0x744, 0x746) that the kernel driver already sets up; only the NVIDIA driver applies them: cTGP moves the GPU power limit (measured 60 W to 70 W for +10 W), Dynamic Boost is not confirmed on this model |
+| The OEM's "Graphics Card" options still missing: GPU temperature target, the Dynamic Boost switch and value, "Unlock Configurable TGP", "Enable Automatic GPU Overboost" | The clock offsets are done (Graphics tab). The temperature target is not offered: this GPU refuses to set it (`nvidia-smi -gtt`: not supported; the 87 C is a read-only specification). cTGP and Dynamic Boost are EC registers (0x743 bits, 0x744, 0x746) that the kernel driver already sets up; only the [NVIDIA driver](#the-nvidia-driver) applies them: cTGP moves the GPU power limit (measured 60 W to 70 W for +10 W) and is a per-profile setting, Dynamic Boost is not confirmed on this model. Automatic GPU overboost: no known mechanism |
 | OSD, per-app profiles, process control, keyboard remap, gaming monitor, liquid cooling (Oasis) | OEM features, not planned yet |
 | Windows backend, MQTT interop with the OEM UI | out of scope for now |
 
@@ -285,7 +289,9 @@ sudo rcc rgb color ff8800 | rainbow on|off | backlight on|off | brightness 60
 sudo rcc touchpad on|off|toggle|status
 sudo rcc popups [on|off]
 sudo rcc system                      # kernel toggles; `rcc system set fn-lock on`
-sudo rcc battery get | profile performance|balanced|healthy
+sudo rcc battery get | profile performance|balanced|healthy   # the battery charge mode: Standard|Long_Life|Trickle
+sudo rcc gpu                         # NVIDIA GPU: power limit, clocks, offsets (needs the NVIDIA driver)
+sudo rcc gpu set --core 50 --mem 200 # save the clock offsets in MHz; `rcc gpu on` applies them, `rcc gpu off` undoes it
 ```
 
 ## Risks
