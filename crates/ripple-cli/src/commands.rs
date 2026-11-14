@@ -840,6 +840,8 @@ fn watch(cli: &Cli) -> CmdResult {
     std::thread::spawn(|| control::touchpad_loop(&NEVER));
     // puts the NVIDIA GPU's clock offsets back after a driver reload (does nothing without the driver)
     std::thread::spawn(|| control::gpu_loop(&NEVER));
+    // the touchpad's corner double tap (keys from the internal keyboard) switches the touchpad off and on
+    std::thread::spawn(|| control::touchpad_key_loop(&NEVER));
     let retry = std::time::Duration::from_secs(10);
     let mut key = open_waiting(control::open_mode_key, retry);
     let _lock = match control::follow_lock(false) {
@@ -978,9 +980,13 @@ fn touchpad(choice: crate::TouchpadChoice) -> CmdResult {
         Off => false,
         Toggle => !now,
         Status => {
+            // powered but silent: the corner double tap (or `on`) brings it back
+            let silent = now && ripple_hw::touchpad::surface_on() == Some(false);
             println!(
                 "touchpad: {}",
-                if now {
+                if silent {
+                    "off (silenced by the double tap, LED on)"
+                } else if now {
                     "on"
                 } else {
                     "off (powered down, LED on)"

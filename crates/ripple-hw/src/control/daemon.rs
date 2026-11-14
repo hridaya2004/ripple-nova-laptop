@@ -128,36 +128,91 @@ pub(super) fn follow_lock_at(path: &std::path::Path, blocking: bool) -> Option<s
     Some(f)
 }
 
-/// Open the "Uniwill WMI hotkeys" input device (root only).
-pub fn open_mode_key() -> HwResult<std::fs::File> {
+/// Open the input device called `name` (root only).
+fn open_input_named(name: &str) -> HwResult<std::fs::File> {
     for e in std::fs::read_dir("/sys/class/input")?.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if !name.starts_with("event") {
+        let node = e.file_name().to_string_lossy().to_string();
+        if !node.starts_with("event") {
             continue;
         }
         let dev_name = std::fs::read_to_string(e.path().join("device/name")).unwrap_or_default();
-        if dev_name.trim() == "Uniwill WMI hotkeys" {
-            return Ok(std::fs::File::open(format!("/dev/input/{name}"))?);
+        if dev_name.trim() == name {
+            return Ok(std::fs::File::open(format!("/dev/input/{node}"))?);
         }
     }
-    Err(HwError::Unavailable(
-        "no 'Uniwill WMI hotkeys' input device (uniwill-laptop not loaded?)".into(),
+    Err(HwError::Unavailable(format!("no '{name}' input device")))
+}
+
+/// Open the "Uniwill WMI hotkeys" input device (root only).
+pub fn open_mode_key() -> HwResult<std::fs::File> {
+    open_input_named("Uniwill WMI hotkeys").map_err(|_| {
+        HwError::Unavailable(
+            "no 'Uniwill WMI hotkeys' input device (uniwill-laptop not loaded?)".into(),
+        )
+    })
+}
+
+/// The next input event of a device as `(type, code, value)`; blocks.
+fn read_input_event(dev: &mut std::fs::File) -> std::io::Result<(u16, u16, i32)> {
+    // struct input_event { struct timeval (2 words); u16 type; u16 code; i32 value }
+    let tv = 2 * std::mem::size_of::<usize>();
+    let mut buf = vec![0u8; tv + 8];
+    dev.read_exact(&mut buf)?;
+    Ok((
+        u16::from_le_bytes([buf[tv], buf[tv + 1]]),
+        u16::from_le_bytes([buf[tv + 2], buf[tv + 3]]),
+        i32::from_le_bytes([buf[tv + 4], buf[tv + 5], buf[tv + 6], buf[tv + 7]]),
     ))
 }
 
 /// Block until the mode button is pressed once (key 184 down).
 pub fn wait_mode_key(dev: &mut std::fs::File) -> HwResult<()> {
-    // struct input_event { struct timeval (2 words); u16 type; u16 code; i32 value }
-    let tv = 2 * std::mem::size_of::<usize>();
-    let mut buf = vec![0u8; tv + 8];
     loop {
-        dev.read_exact(&mut buf)?;
-        let typ = u16::from_le_bytes([buf[tv], buf[tv + 1]]);
-        let code = u16::from_le_bytes([buf[tv + 2], buf[tv + 3]]);
-        let value = i32::from_le_bytes([buf[tv + 4], buf[tv + 5], buf[tv + 6], buf[tv + 7]]);
+        let (typ, code, value) = read_input_event(dev)?;
         if typ == 1 && code == MODE_KEY_CODE && value == 1 {
             return Ok(());
         }
+    }
+}
+
+/// The daemon's touchpad-gesture loop. The corner double tap reaches the system only as keys the embedded
+/// controller types on the internal keyboard (Left Ctrl + Left Meta + F24); the kernel does nothing with them
+/// and GNOME did not act on the real ones, so the daemon does what the firmware's own gesture does: it switches
+/// the touchpad's surface off or on (LED included). The pad stays awake, so the same gesture brings it back.
+pub fn touchpad_key_loop(stop: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    // never start with the pad silenced by an earlier run
+    if crate::touchpad::surface_on() == Some(false) {
+        let _ = crate::touchpad::set_surface(true);
+    }
+    let mut said = String::new(); // a standing problem is logged once
+    while !stop.load(Relaxed) {
+        let mut keys = match open_input_named("AT Translated Set 2 keyboard") {
+            Ok(k) => k,
+            Err(e) => {
+                if said != e.to_string() {
+                    said = e.to_string();
+                    eprintln!("touchpad gesture: {e}");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                continue;
+            }
+        };
+        let mut chord = crate::touchpad::ToggleKey::default();
+        while let Ok((typ, code, value)) = read_input_event(&mut keys) {
+            if typ != 1 || !chord.feed(code, value) {
+                continue;
+            }
+            match crate::touchpad::toggle_surface() {
+                Ok(on) => {
+                    if crate::notify::popups_enabled() {
+                        crate::notify::send_to_logged_in("Touchpad", if on { "on" } else { "off" });
+                    }
+                }
+                Err(e) => eprintln!("touchpad gesture: {e}"),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2)); // the device went away: look for it again
     }
 }
 

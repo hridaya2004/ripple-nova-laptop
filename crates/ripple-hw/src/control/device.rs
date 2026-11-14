@@ -48,7 +48,12 @@ pub fn set_touchpad(on: bool) -> HwResult<()> {
         c.touchpad_on = on;
         Ok(())
     })?;
-    crate::touchpad::set(on)
+    crate::touchpad::set(on)?;
+    if on {
+        // a pad the corner double tap silenced comes back too (nothing to do, and no error, when it was just bound)
+        let _ = crate::touchpad::set_surface(true);
+    }
+    Ok(())
 }
 
 /// The daemon's touchpad loop: every two seconds, make the touchpad match the saved choice.

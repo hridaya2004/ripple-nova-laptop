@@ -57,12 +57,17 @@ on a real laptop.
   which the sudoers rule allows without a password, for instance from a keyboard shortcut). AC Auto-Boot, USB
   powershare and the firmware's own Touchpad toggle are also there. Breathing in suspend is a
   lightbar feature: it only shows on a machine whose EC reports a lightbar.
-- **Touchpad double tap**: a double tap in the touchpad's top-left corner switches it off and on, with its LED, as on
-  Windows. The embedded controller types Left Ctrl + Left Meta + F24 on the internal keyboard (this is what
-  `acpi_listen` and `evtest /dev/input/event3` show); `install.sh` installs `/etc/udev/hwdb.d/61-uniwill-touchpad.hwdb`
-  (from `dist/`), which turns F24 (scancode `0x76`) into the touchpad-toggle key that GNOME and KDE act on. Found in
-  [uniwill-laptop issue 22](https://github.com/Wer-Wolf/uniwill-laptop/issues/22). It works while the desktop has the
-  touchpad open; the *Touchpad power* switch above (which powers the touchpad down) cannot be undone by the gesture.
+- **Touchpad double tap**: a double tap in the touchpad's top-left corner switches it off and on, LED included, as on
+  Windows. The embedded controller reports it as keys on the internal keyboard (Left Ctrl + Left Meta + F24, scancode
+  `0x76`; see [uniwill-laptop issue 22](https://github.com/Wer-Wolf/uniwill-laptop/issues/22)). `install.sh` installs
+  `/etc/udev/hwdb.d/61-uniwill-touchpad.hwdb` (from `dist/`), which turns F24 into the touchpad-toggle key that desktops
+  act on. GNOME did not act on it for the real keyboard, so the service (`rcc watch`) does as well: it switches the
+  touchpad's *surface switch* (HID feature report `0x07`, off = no pointer and the LED lit, the pad stays awake so the
+  same gesture brings it back). A pad left silent comes back when the service starts and with `rcc touchpad on`;
+  `rcc touchpad status` tells the two kinds of off apart. If a desktop does start acting on the touchpad-toggle key too,
+  the touchpad would toggle twice: delete the hwdb entry then (`sudo rm /etc/udev/hwdb.d/61-uniwill-touchpad.hwdb`,
+  `sudo systemd-hwdb update`, `sudo udevadm trigger --subsystem-match=input`); the service reads F24 with Ctrl and Meta
+  either way.
 - **Tray**: click the icon to open the window. Its menu has a **Performance profile** shortcut (the current profile
   ticked, "service not running" when the daemon is down) and an **Enable / Disable notifications** item. Without the sudoers rule,
   polkit asks for a password instead.
@@ -92,7 +97,6 @@ on a real laptop.
 |---|---|
 | Battery charge *limit* (EC 1977/2000) | parked on purpose; only the three battery charge modes exist |
 | EC fan *curve tables* and the OEM per-model `UserFanTables` | blocked: this model has no OEM tables and its EC curve RAM reads empty. The custom fan profile is software-driven instead |
-| Touchpad double-tap toggle and its LED | the key mapping is installed (see *Touchpad double tap*); whether the desktop's toggle and the firmware's LED stay in step is still to be checked on the laptop |
 | Keyboard: per-zone colours, other effects, a moving rainbow, music mode, saved effects | not started (the EC only gave a static rainbow) |
 | Lightbar | this laptop has none (the kernel exposes one anyway; the controls are hidden) |
 | Display refresh rate (needs kscreen-doctor, xrandr or wlr-randr), display colour profiles, dGPU power / mux mode | not started. dGPU power needs a verified ACPI `_OFF`/`_ON` pair first: a wrong `_OFF` is risky, so it is not wired |
