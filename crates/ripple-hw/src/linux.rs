@@ -548,19 +548,19 @@ pub const CHARGE_PROFILES: [ChargeProfile; 3] = [
         kernel: "Standard",
         label: "Standard",
         oem: "High capacity",
-        info: "High charging speed and maximum capacity.",
+        info: "Full capacity: charges to the maximum at high speed.",
     },
     ChargeProfile {
         kernel: "Long_Life",
         label: "Long life",
         oem: "Balanced",
-        info: "Ideal balance between battery capacity and life. Charging speed and peak capacity are slightly reduced.",
+        info: "Reduced capacity, for a longer battery life: charging speed and peak capacity are slightly reduced.",
     },
     ChargeProfile {
         kernel: "Trickle",
         label: "Trickle",
         oem: "Eco, healthy",
-        info: "For using the laptop almost only on external power. Charging speed and peak capacity are reduced even more.",
+        info: "Stationary use: for a laptop that stays on external power; charging speed and peak capacity are reduced even more.",
     },
 ];
 

@@ -70,8 +70,8 @@ on a real laptop.
   on, only the tray icon starts and the window opens from it. The service always starts at boot, whatever these say.
 - **Battery** tab (and `rcc battery`): the battery charge mode, one of the types the kernel lists in `charge_types`
   (`Trickle`, `Standard`, `Long_Life`). The descriptions use the OEM's words and names, which match the EC values
-  (0, 1, 2): *Standard* is High capacity, *Long life* is Balanced (speed and peak capacity slightly reduced),
-  *Trickle* is Eco, "healthy" (reduced even more, for laptops that stay on external power). The tab also shows
+  (0, 1, 2): *Standard* is full capacity (OEM: High capacity), *Long life* is reduced capacity (OEM: Balanced), *Trickle*
+  is stationary use (OEM: Eco, "healthy"; for laptops that stay on external power, reduced even more). The tab also shows
   charge, status, health and the current: with a mode other than Standard the firmware can report Full or Charging
   while no current flows, so trust the current.
 - **Graphics** tab (and `rcc gpu`), shown only when [the NVIDIA driver](#the-nvidia-driver) is loaded: the GPU's power
