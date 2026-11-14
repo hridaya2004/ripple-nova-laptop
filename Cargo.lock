@@ -4535,6 +4535,7 @@ name = "ripple-tray"
 version = "0.1.0"
 dependencies = [
  "ksni",
+ "ripple-hw",
 ]
 
 [[package]]

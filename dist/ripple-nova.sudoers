@@ -2,8 +2,8 @@
 # password (the app needs root for the EC). It grants exactly these commands and nothing else: no other
 # binary, no other arguments, and no SETENV, so the environment cannot be used to inject code. Both
 # binaries are root-owned (the second is the copy "Open at login" makes). Plus exactly three `rcc touchpad`
-# commands (power the touchpad on / off / the other one) and exactly three `rcc mode set` commands (the tray
-# icon's profile shortcut).
+# commands (power the touchpad on / off / the other one), exactly three `rcc mode set` commands (the tray
+# icon's profile shortcut) and exactly two `rcc popups` commands (its popups switch).
 # Remove it with ./install.sh --uninstall, or delete this file: the launcher then asks polkit again.
 Cmnd_Alias RIPPLE_GUI = @BINDIR@/rcc-gui "", /usr/local/lib/ripple-nova/rcc-gui ""
 # the four display variables, for these commands only, so the window can open on your desktop
@@ -12,4 +12,6 @@ Defaults!RIPPLE_GUI env_keep += "WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XAUTHOR
 Cmnd_Alias RIPPLE_TOUCHPAD = @BINDIR@/rcc touchpad on, @BINDIR@/rcc touchpad off, @BINDIR@/rcc touchpad toggle
 # the tray icon's performance profile shortcut: the three stock profiles, no Custom, no other argument
 Cmnd_Alias RIPPLE_MODE = @BINDIR@/rcc mode set balanced, @BINDIR@/rcc mode set enthusiast, @BINDIR@/rcc mode set overboost
-@USER@ ALL=(root) NOPASSWD: RIPPLE_GUI, RIPPLE_TOUCHPAD, RIPPLE_MODE
+# the tray icon's popups switch: on or off, no other argument
+Cmnd_Alias RIPPLE_POPUPS = @BINDIR@/rcc popups on, @BINDIR@/rcc popups off
+@USER@ ALL=(root) NOPASSWD: RIPPLE_GUI, RIPPLE_TOUCHPAD, RIPPLE_MODE, RIPPLE_POPUPS

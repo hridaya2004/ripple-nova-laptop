@@ -144,6 +144,28 @@ fn popups_from(json: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Switch the "Show popup" setting (the file is root's), keeping the window's other preferences.
+/// The daemon reads it again at every popup: no restart needed.
+pub fn set_popups(on: bool) -> std::io::Result<()> {
+    let old = std::fs::read_to_string(GUI_SETTINGS).unwrap_or_default();
+    if let Some(dir) = Path::new(GUI_SETTINGS).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json =
+        serde_json::to_string_pretty(&with_popups(&old, on)).map_err(std::io::Error::other)?;
+    std::fs::write(GUI_SETTINGS, json)
+}
+
+/// `json` with `popups` set, every other key kept; anything but a JSON object reads as an empty one.
+fn with_popups(json: &str, on: bool) -> serde_json::Value {
+    let mut v = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    v["popups"] = on.into();
+    v
+}
+
 /// Toggles whose effect is not established on every machine (or was not seen here): the window marks them.
 pub fn is_experimental(name: &str) -> bool {
     matches!(
@@ -278,6 +300,22 @@ mod tests {
         assert!(popups_from(r#"{"light":true}"#));
         assert!(popups_from(r#"{"popups":true}"#));
         assert!(!popups_from(r#"{"popups":false}"#));
+    }
+
+    #[test]
+    fn setting_popups_keeps_the_other_keys() {
+        assert_eq!(
+            with_popups(r#"{"light":true,"font":null,"popups":true}"#, false),
+            serde_json::json!({"light": true, "font": null, "popups": false})
+        );
+        assert_eq!(
+            with_popups("not json", true),
+            serde_json::json!({"popups": true})
+        );
+        assert_eq!(
+            with_popups("[1]", false),
+            serde_json::json!({"popups": false})
+        );
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub fn run(cli: &Cli) -> CmdResult {
         crate::Command::Display { cmd } => display(cli, cmd),
         crate::Command::System { cmd } => system(cli, cmd),
         crate::Command::Touchpad { state } => touchpad(*state),
+        crate::Command::Popups { state } => popups(*state),
         crate::Command::Ec { cmd } => ec_cmd(cli, cmd),
     }
 }
@@ -832,6 +833,16 @@ fn touchpad(choice: crate::TouchpadChoice) -> CmdResult {
             "off (powered down, LED on)"
         }
     );
+    Ok(())
+}
+
+fn popups(state: Option<crate::OnOff>) -> CmdResult {
+    if let Some(s) = state {
+        ripple_hw::notify::set_popups(s.as_bool())
+            .map_err(|e| format!("could not save the popup setting: {e} (run with sudo)"))?;
+    }
+    let on = ripple_hw::notify::popups_enabled();
+    println!("popups: {}", if on { "on" } else { "off" });
     Ok(())
 }
 

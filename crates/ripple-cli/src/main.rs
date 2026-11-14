@@ -120,6 +120,14 @@ pub enum Command {
         #[arg(value_enum)]
         state: TouchpadChoice,
     },
+    /// Desktop popups when the profile, fan boost or a toggle changes: `on`, `off`, or nothing to show it
+    ///
+    /// The tray icon's menu switches this too (`sudo -n rcc popups on|off`, no password with the installer's
+    /// sudoers rule). The service picks the change up at the next popup.
+    Popups {
+        #[arg(value_enum)]
+        state: Option<OnOff>,
+    },
     /// Kernel platform toggles (fn-lock, super key, touchpad, USB-C priority, cTGP)
     ///
     /// `rcc system` alone lists every attribute with its current value.

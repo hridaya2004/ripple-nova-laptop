@@ -28,7 +28,7 @@ use hw::{FanMode, Field, Hw, Snapshot, PROFILES};
 use input::{Outcome, TextInput};
 use ripple_core::modes::OperatingMode;
 use ripple_hw::control::{self, Hsv, Preset, Profile};
-use ripple_hw::notify::{ensure_tray, is_experimental, toggle_label};
+use ripple_hw::notify::{ensure_tray, is_experimental, popups_enabled, toggle_label};
 use settings::Settings;
 
 /// Zed's One Dark / One Light, reduced to what this UI uses.
@@ -247,6 +247,8 @@ impl Ui {
             if this
                 .update(cx, |ui, cx| {
                     ui.snap = snap;
+                    // the tray icon's menu and `rcc popups` change it too; a stale copy would also be saved back
+                    ui.settings.popups = popups_enabled();
                     cx.notify();
                 })
                 .is_err()

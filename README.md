@@ -16,7 +16,7 @@ on a real laptop.
 
 | Part | What it is |
 |---|---|
-| `rcc` | command line: `rcc doctor`, `status`, `mode`, `fan`, `rgb`, `battery`, `system`, `touchpad`, `ec` (raw EC access, for development) |
+| `rcc` | command line: `rcc doctor`, `status`, `mode`, `fan`, `rgb`, `battery`, `system`, `touchpad`, `popups`, `ec` (raw EC access, for development) |
 | `rcc-gui` | the window (GPUI): profiles, fans, keyboard, toggles, settings. Needs root; started through `ripple-nova` |
 | `ripple-nova.service` | root daemon (`rcc watch`): follows the hardware mode button, restores the profile at boot, runs the custom fan profile, sends the popups |
 | `rcc-tray` | tray icon (runs as you; started by the window, and at login when *Open at login* is on): a click opens the window, the menu switches the performance profile. GNOME needs the AppIndicator extension |
@@ -55,10 +55,12 @@ on a real laptop.
   powershare, the firmware's Touchpad toggle and Touchpad power are marked *experimental*. Breathing in suspend is a
   lightbar feature: it only shows on a machine whose EC reports a lightbar.
 - **Tray**: click the icon to open the window. Its menu has a **Performance profile** shortcut (the current profile
-  ticked, "service not running" when the daemon is down). Without the sudoers rule, polkit asks for a password instead.
+  ticked, "service not running" when the daemon is down) and an **Enable / Disable notifications** item. Without the sudoers rule,
+  polkit asks for a password instead.
   The window starts the tray icon too, and so does login when *Open at login* is on.
 - **Popups** (any freedesktop notification daemon): when the profile, fan boost or a toggle changes, whoever changed it
-  (window, hardware button, Fn key, CLI). Optional: System → Toggles → *Show popup*.
+  (window, hardware button, Fn key, CLI). Optional: System → Toggles → *Show popup*, the tray menu's *Enable / Disable notifications*,
+  or `rcc popups on|off`.
 - **Window**: dark/light theme, a font field with typeahead over every installed family, an editable hex keyboard
   colour, no password prompt. Closing the window ends it; the tray icon opens it again.
 - **Startup**: *Open at login* (Settings) starts the window and the tray icon when you log in; with *Start minimized*
@@ -176,13 +178,14 @@ start the window as root without a password**. It grants exactly:
 
 - `/usr/local/bin/rcc-gui` with no arguments, and the root-owned copy of it that *Open at login* installs
   (`/usr/local/lib/ripple-nova/rcc-gui`, also with no arguments),
-- `rcc touchpad on`, `off` and `toggle`, and `rcc mode set balanced`, `enthusiast` and `overboost` (the tray icon's
-  profile shortcut): these exact commands, no other arguments, no `custom`,
+- `rcc touchpad on`, `off` and `toggle`, `rcc mode set balanced`, `enthusiast` and `overboost` (the tray icon's
+  profile shortcut), and `rcc popups on` and `off` (its popups switch): these exact commands, no other arguments,
+  no `custom`,
 - with the four display variables (`WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XAUTHORITY`) kept for the window
   command only, and **no `SETENV`** (that would allow `LD_PRELOAD` and amount to full root).
 
 What that means: any process running as you can start the window as root and drive it (EC settings, the files in
-`/etc/ripple-nova`, the login entry), and switch the profile or the touchpad, but cannot run anything else as root through it. It is a
+`/etc/ripple-nova`, the login entry), and switch the profile, the touchpad or the popups, but cannot run anything else as root through it. It is a
 convenience with a real, bounded cost: if you do not want it, use `./install.sh --no-sudoers`, or remove it later
 with `sudo rm /etc/sudoers.d/ripple-nova`. The launcher then falls back to polkit.
 
@@ -212,6 +215,7 @@ sudo rcc fan boost on|off            # refused while the custom fan profile is o
 sudo rcc fan custom show|on|off|set --cpu 20,30,45,70,100 --gpu 0,25,40,65,100|reset
 sudo rcc rgb color ff8800 | rainbow on|off | backlight on|off | brightness 60
 sudo rcc touchpad on|off|toggle|status
+sudo rcc popups [on|off]
 sudo rcc system                      # kernel toggles; `rcc system set fn-lock on`
 sudo rcc battery get | profile performance|balanced|healthy
 ```

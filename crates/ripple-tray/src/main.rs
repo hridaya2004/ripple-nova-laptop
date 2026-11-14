@@ -5,7 +5,8 @@
 //! The menu also holds a shortcut for the performance profile (Balanced / Enthusiast / Overboost). The
 //! current one is read from the file the daemon publishes (this process cannot read the EC); picking one
 //! runs `rcc mode set <name>` as root, through the exact sudoers entries install.sh writes (polkit asks
-//! when there are none).
+//! when there are none). "Enable / Disable notifications" works the same way (`rcc popups on|off`); the
+//! popups' state is read from the window's settings file, which anyone can read.
 //!
 //! GNOME shows tray icons only with the AppIndicator extension. Until a tray host exists the helper
 //! simply waits (it does not exit), so enabling the extension later is enough.
@@ -16,6 +17,7 @@ use std::time::Duration;
 use ksni::blocking::TrayMethods;
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem};
 use ksni::{Category, Tray};
+use ripple_hw::notify::popups_enabled;
 
 /// `(name for rcc, label)`. The sudoers rule lists `rcc mode set <name>` for exactly these three.
 const PROFILES: [(&str, &str); 3] = [
@@ -30,6 +32,8 @@ const PROFILE_FILE: &str = "/run/ripple-nova-profile";
 struct RippleTray {
     /// What the daemon last published (`custom` and `unknown` are possible); `None` = no fresh file, so no daemon.
     profile: Option<String>,
+    /// Are the popups (notifications) on, as the settings file has it.
+    popups: bool,
 }
 
 /// The published profile, unless the file is stale (the daemon rewrites it every second).
@@ -62,30 +66,41 @@ fn open_window() {
     run("ripple-nova", &[]);
 }
 
-/// Switch the profile. `sudo -n` when the sudoers rule allows exactly this command, else polkit asks (as the
-/// launcher does). The daemon notices the change within a second: the menu and the popup follow from there.
-fn set_profile(name: &'static str) {
+/// Run `rcc <args>` as root. `sudo -n` when the sudoers rule allows exactly this command, else polkit asks (as
+/// the launcher does). The menu follows from the daemon's published profile / the settings file within a second.
+fn rcc_as_root(args: Vec<&'static str>) {
     std::thread::spawn(move || {
         let rcc = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|dir| dir.join("rcc")))
             .unwrap_or_else(|| "/usr/local/bin/rcc".into());
-        let args = ["mode", "set", name];
         let allowed = Command::new("sudo")
             .args(["-n", "-l"])
             .arg(&rcc)
-            .args(args)
+            .args(&args)
             .output()
             .is_ok_and(|o| o.status.success());
         let done = if allowed {
-            Command::new("sudo").arg("-n").arg(&rcc).args(args).status()
+            Command::new("sudo")
+                .arg("-n")
+                .arg(&rcc)
+                .args(&args)
+                .status()
         } else {
-            Command::new("pkexec").arg(&rcc).args(args).status()
+            Command::new("pkexec").arg(&rcc).args(&args).status()
         };
         if !done.is_ok_and(|s| s.success()) {
-            eprintln!("rcc-tray: could not switch the profile to {name}");
+            eprintln!("rcc-tray: `rcc {}` failed", args.join(" "));
         }
     });
+}
+
+fn set_profile(name: &'static str) {
+    rcc_as_root(vec!["mode", "set", name]);
+}
+
+fn set_popups(on: bool) {
+    rcc_as_root(vec!["popups", if on { "on" } else { "off" }]);
 }
 
 impl Tray for RippleTray {
@@ -149,6 +164,19 @@ impl Tray for RippleTray {
             }
             .into(),
             MenuItem::Separator,
+            // offers the opposite of what is now
+            StandardItem {
+                label: if self.popups {
+                    "Disable notifications"
+                } else {
+                    "Enable notifications"
+                }
+                .into(),
+                activate: Box::new(|tray: &mut Self| set_popups(!tray.popups)),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
             StandardItem {
                 label: "Quit".into(),
                 icon_name: "application-exit".into(),
@@ -169,9 +197,10 @@ fn main() {
     // not an error; the icon appears when one shows up. If the service ever ends (or cannot start), try again:
     // the icon is meant to be always there; "Quit" is the only way out.
     loop {
-        let mut shown = published_profile();
+        let mut shown = (published_profile(), popups_enabled());
         match (RippleTray {
-            profile: shown.clone(),
+            profile: shown.0.clone(),
+            popups: shown.1,
         })
         .assume_sni_available(true)
         .spawn()
@@ -180,10 +209,13 @@ fn main() {
                 while !handle.is_closed() {
                     std::thread::sleep(Duration::from_secs(1));
                     // only a real change re-sends the menu (an open menu would be redrawn for nothing)
-                    let now = published_profile();
+                    let now = (published_profile(), popups_enabled());
                     if now != shown {
                         shown = now.clone();
-                        handle.update(|tray| tray.profile = now);
+                        handle.update(|tray| {
+                            tray.profile = now.0;
+                            tray.popups = now.1;
+                        });
                     }
                 }
                 eprintln!("rcc-tray: the tray service ended, starting it again");
@@ -202,6 +234,7 @@ mod tests {
     fn profile_menu(profile: Option<&str>) -> (usize, String) {
         let tray = RippleTray {
             profile: profile.map(String::from),
+            popups: true,
         };
         let items = tray.menu();
         let selected = items
@@ -245,6 +278,27 @@ mod tests {
                 "Performance profile (service not running)".to_string()
             )
         );
+    }
+
+    #[test]
+    fn the_menu_offers_the_opposite_of_the_popups_state() {
+        let label = |popups| {
+            let tray = RippleTray {
+                profile: None,
+                popups,
+            };
+            tray.menu()
+                .iter()
+                .find_map(|i| match i {
+                    MenuItem::Standard(s) if s.label.ends_with("notifications") => {
+                        Some(s.label.clone())
+                    }
+                    _ => None,
+                })
+                .expect("a notifications item")
+        };
+        assert_eq!(label(true), "Disable notifications");
+        assert_eq!(label(false), "Enable notifications");
     }
 
     #[test]
