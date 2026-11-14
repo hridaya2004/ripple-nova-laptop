@@ -549,6 +549,10 @@ pub const PLATFORM_ATTRS: &[&str] = &[
     "usb_powershare_high",
 ];
 
+/// Never both on: the driver doc calls it unsupported, but nothing in the kernel stops it, so
+/// `set_attr` switches the other off when one is enabled.
+const EXCLUSIVE: [&str; 2] = ["ac_auto_boot", "usb_powershare_high"];
+
 /// The kernel calls the fans "Main"/"Secondary"; the Windows app names them by what they cool:
 /// fan 1 = CPU, fan 2 = GPU.
 fn fan_label(idx: u32) -> String {
@@ -895,6 +899,14 @@ impl SysfsEc {
             "off" | "false" | "0" | "disable" | "disabled" => "0",
             other => other,
         };
+        if normalised == "1" && EXCLUSIVE.contains(&name) {
+            for other in EXCLUSIVE.iter().filter(|o| **o != name) {
+                // an absent partner (older kernel) has nothing to switch off
+                if self.get_attr(other).is_ok_and(|v| v == "1") {
+                    self.set_attr(other, "0")?;
+                }
+            }
+        }
         write_sysfs(&path, normalised)?;
         Ok(normalised.to_string())
     }
@@ -921,6 +933,48 @@ impl EcAccess for SysfsEc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_boot_and_powershare_exclude_each_other() {
+        let dir = std::env::temp_dir().join(format!("ripple-excl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ec = SysfsEc {
+            hwmon: std::path::PathBuf::new(),
+            platform: Some(dir.clone()),
+        };
+        let state = |a: &str, p: &str| {
+            std::fs::write(dir.join("ac_auto_boot"), format!("{a}\n")).unwrap();
+            std::fs::write(dir.join("usb_powershare_high"), format!("{p}\n")).unwrap();
+        };
+        let get = |n: &str| ec.get_attr(n).unwrap();
+
+        state("0", "1");
+        ec.set_attr("ac_auto_boot", "on").unwrap();
+        assert_eq!(
+            (get("ac_auto_boot"), get("usb_powershare_high")),
+            ("1".into(), "0".into())
+        );
+
+        ec.set_attr("usb_powershare_high", "on").unwrap();
+        assert_eq!(
+            (get("ac_auto_boot"), get("usb_powershare_high")),
+            ("0".into(), "1".into())
+        );
+
+        // turning one off leaves the other alone
+        state("0", "1");
+        ec.set_attr("ac_auto_boot", "off").unwrap();
+        assert_eq!(
+            (get("ac_auto_boot"), get("usb_powershare_high")),
+            ("0".into(), "1".into())
+        );
+
+        // no partner attribute (older kernel): the write still goes through
+        std::fs::remove_file(dir.join("usb_powershare_high")).unwrap();
+        ec.set_attr("ac_auto_boot", "on").unwrap();
+        assert_eq!(get("ac_auto_boot"), "1");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn parse_hex_and_decimal() {
