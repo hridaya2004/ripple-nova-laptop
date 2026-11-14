@@ -244,22 +244,33 @@ pub enum FanCmd {
 
 #[derive(Subcommand)]
 pub enum CustomFanCmd {
-    /// Show the curves and whether they are on
-    Show,
+    /// Show the curves of the running profile (or `--profile`) and whether the custom profile is on
+    Show {
+        /// office, gaming, turbo or the name of one of your profiles; default: the one running now
+        #[arg(long)]
+        profile: Option<String>,
+    },
     /// Turn the custom profile on (the service applies it within a few seconds)
     On,
     /// Turn it off and give the fans back to the firmware
     Off,
-    /// Set the curves: duty % at 45/55/65/75/85 °C, five values each, never falling
-    /// (e.g. `--cpu 20,30,45,70,100`). Fan 1 follows the CPU temperature, fan 2 the GPU's.
+    /// Set the curves of a profile: duty % at 45/55/65/75/85 °C, five values each, never falling
+    /// (e.g. `--cpu 30,35,48,55,85`). Fan 1 follows the CPU temperature, fan 2 the GPU's.
     Set {
         #[arg(long, value_delimiter = ',')]
         cpu: Option<Vec<u8>>,
         #[arg(long, value_delimiter = ',')]
         gpu: Option<Vec<u8>>,
+        /// office, gaming, turbo or the name of one of your profiles; default: the one running now
+        #[arg(long)]
+        profile: Option<String>,
     },
-    /// Put the curves back to the default preset (on/off is kept)
-    Reset,
+    /// Put the curves of a profile back to its default preset (on/off is kept)
+    Reset {
+        /// office, gaming, turbo or the name of one of your profiles; default: the one running now
+        #[arg(long)]
+        profile: Option<String>,
+    },
     /// Run the engine in the foreground (what the service does, for testing). Stopping it any other
     /// way than `--seconds` leaves the fans manual: run `rcc fan release`
     Run {

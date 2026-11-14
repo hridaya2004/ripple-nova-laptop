@@ -4,7 +4,7 @@
 
 use ripple_core::modes::OperatingMode;
 use ripple_core::regs::addr;
-use ripple_hw::control::{self, Config, CustomProfile, FanCurves, Hsv, Preset, Profile};
+use ripple_hw::control::{self, Config, CustomProfile, FanCurves, FanSet, Hsv, Preset, Profile};
 use ripple_hw::linux::{self, SysfsEc};
 use ripple_hw::EcAccess;
 
@@ -43,8 +43,11 @@ pub struct Snapshot {
     pub customs: Vec<CustomProfile>,
     /// Fan boost is on (not the custom profile, which shares the EC bit).
     pub boosted: bool,
-    /// The custom fan profile: curves and whether the daemon applies them.
+    /// The curves of the running profile (the user's own, else the default) and whether the daemon
+    /// applies them.
     pub fan: FanCurves,
+    /// The default curves of the running profile: what Auto shows, what "Default preset" goes back to.
+    pub fan_default: FanSet,
     pub auto_boost: Option<u8>,
     pub has_lightbar: bool,
     pub lightbar: Option<(u8, u8, u8)>,
@@ -77,6 +80,17 @@ impl Snapshot {
         }
     }
 
+    /// The stock mode a profile is, or the one yours started from (what its defaults come from).
+    pub fn mode_name(&self, p: Profile) -> &'static str {
+        match p {
+            Profile::Custom(i) => self
+                .customs
+                .get(i)
+                .map_or("Gaming", |c| Profile::Stock(c.base).name()),
+            _ => p.name(),
+        }
+    }
+
     /// The limits a profile sets.
     pub fn preset(&self, p: Profile) -> Preset {
         control::preset_for(&self.stock, &self.customs, p)
@@ -105,6 +119,7 @@ impl Default for Snapshot {
             customs: vec![],
             boosted: false,
             fan: FanCurves::default(),
+            fan_default: control::default_fan_set(OperatingMode::Gaming),
             auto_boost: None,
             has_lightbar: false,
             lightbar: None,
@@ -205,8 +220,8 @@ impl Hw {
         };
         let (stock, customs) = (self.stock, self.cfg.profiles.clone());
         self.cfg.fan = saved.fan;
+        self.cfg.fan_sets = saved.fan_sets;
         self.cfg.touchpad_on = saved.touchpad_on; // chosen elsewhere too (CLI, daemon): never write back a stale one
-        s.fan = self.cfg.fan.clone();
         let mut manual = None; // what the fans are told to run at, while the EC follows the duty registers
         if let Some(ec) = self.ec.as_deref_mut() {
             s.profile = control::running(ec, &stock, &customs).ok().flatten();
@@ -233,6 +248,10 @@ impl Hw {
                 ec.read(1860).map_or("n/a".into(), |v| v.to_string()),
             );
         }
+        // each profile has its own fan curves: those of the running one (Gaming's when it is not known)
+        let shown = s.profile.unwrap_or(Profile::Stock(OperatingMode::Gaming));
+        s.fan = self.cfg.fan_curves(shown);
+        s.fan_default = self.cfg.fan_default(shown);
         // The chosen colour/brightness while the EC still shows it; else whatever the EC shows now.
         s.hsv = control::keyboard_choice(self.cfg.keyboard, s.keyboard).unwrap_or(s.hsv);
         if let Some(u) = &self.sysfs {
@@ -434,6 +453,7 @@ impl Hw {
         let gone = self.profile_at(idx)?;
         let was_running = self.is_running(Profile::Custom(idx));
         self.cfg.profiles.remove(idx);
+        self.cfg.fan_sets.remove(&gone.name);
         self.cfg.save().map_err(|e| e.to_string())?;
         if was_running {
             self.set_profile(Profile::Stock(gone.base))?;
@@ -482,34 +502,48 @@ impl Hw {
         })
     }
 
-    /// Set one point of a custom curve (fan 0 = CPU, 1 = GPU); the curve never falls, so the points
+    /// Reload what the CLI may have changed since: the profiles and the fan curves.
+    fn reload_fan(&mut self) {
+        let saved = Config::load();
+        self.cfg.profiles = saved.profiles;
+        self.cfg.fan = saved.fan;
+        self.cfg.fan_sets = saved.fan_sets;
+    }
+
+    /// Set one point of a profile's curve (fan 0 = CPU, 1 = GPU); the curve never falls, so the points
     /// around it move with it.
-    pub fn set_fan_point(&mut self, fan: usize, idx: usize, duty: u8) -> Result<String, String> {
-        self.cfg.fan = Config::load().fan;
-        let c = if fan == 0 {
-            &mut self.cfg.fan.cpu
-        } else {
-            &mut self.cfg.fan.gpu
-        };
+    pub fn set_fan_point(
+        &mut self,
+        profile: Profile,
+        fan: usize,
+        idx: usize,
+        duty: u8,
+    ) -> Result<String, String> {
+        self.reload_fan();
+        let mut set = self.cfg.fan_set(profile);
+        let c = if fan == 0 { &mut set.cpu } else { &mut set.gpu };
         control::set_curve_point(c, idx, duty);
-        self.cfg.fan.validate()?;
+        set.validate()?;
+        self.cfg.set_fan_set(profile, set);
         self.cfg.save().map_err(|e| e.to_string())?;
         Ok(format!(
-            "{} fan: {duty} % at {} °C",
+            "{} fan ({}): {duty} % at {} °C",
             if fan == 0 { "CPU" } else { "GPU" },
+            self.label(profile),
             control::FAN_ANCHORS[idx]
         ))
     }
 
-    /// The default preset (on/off is kept).
-    pub fn reset_fan_curves(&mut self) -> Result<String, String> {
-        let enabled = Config::load().fan.enabled;
-        self.cfg.fan = FanCurves {
-            enabled,
-            ..FanCurves::default()
-        };
+    /// Back to the default curves of the profile (on/off is kept).
+    pub fn reset_fan_curves(&mut self, profile: Profile) -> Result<String, String> {
+        self.reload_fan();
+        let default = self.cfg.fan_default(profile);
+        self.cfg.set_fan_set(profile, default);
         self.cfg.save().map_err(|e| e.to_string())?;
-        Ok("fan curves: default preset".into())
+        Ok(format!(
+            "fan curves ({}): default preset",
+            self.label(profile)
+        ))
     }
 
     pub fn set_auto_boost(&mut self, t: Option<u8>) -> Result<String, String> {

@@ -614,6 +614,25 @@ fn profile_label(cfg: &Config, p: Profile) -> String {
     }
 }
 
+/// The profile a `rcc fan custom` command means: `--profile` (a stock mode or one of yours), else what is
+/// running now, else Gaming.
+fn fan_profile(cli: &Cli, cfg: &Config, name: &Option<String>) -> Result<Profile, String> {
+    use clap::ValueEnum;
+    if let Some(n) = name {
+        return Ok(match ModeChoice::from_str(n, true) {
+            Ok(m) => Profile::Stock(operating_mode(m)),
+            Err(_) => Profile::Custom(find_profile(cfg, n)?),
+        });
+    }
+    let running = open_ec(cli).ok().and_then(|mut ec| {
+        let stock = control::stock(Some(ec.as_mut()));
+        control::running(ec.as_mut(), &stock, &cfg.profiles)
+            .ok()
+            .flatten()
+    });
+    Ok(running.unwrap_or(Profile::Stock(OperatingMode::Gaming)))
+}
+
 fn find_profile(cfg: &Config, name: &str) -> Result<usize, String> {
     cfg.profiles
         .iter()
@@ -778,6 +797,7 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
         ModeCmd::Delete { name } => {
             let i = find_profile(&cfg, name)?;
             let gone = cfg.profiles.remove(i);
+            cfg.fan_sets.remove(&gone.name);
             cfg.save()?;
             println!("profile '{}' deleted", gone.name);
             Ok(())
@@ -956,19 +976,27 @@ fn popups(state: Option<crate::OnOff>) -> CmdResult {
 fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
     let mut cfg = Config::load();
     match cmd {
-        CustomFanCmd::Show => {
+        CustomFanCmd::Show { profile } => {
+            let p = fan_profile(cli, &cfg, profile)?;
+            let set = cfg.fan_set(p);
             let anchors: Vec<String> = control::FAN_ANCHORS
                 .iter()
                 .map(|t| format!("{t:>4}"))
                 .collect();
             let row = |d: &[u8; 5]| d.iter().map(|d| format!("{d:>4}")).collect::<String>();
             println!(
-                "custom fan profile: {}",
-                if cfg.fan.enabled { "on" } else { "off" }
+                "custom fan profile: {} (curves of {}, {})",
+                if cfg.fan.enabled { "on" } else { "off" },
+                profile_label(&cfg, p),
+                if cfg.fan_sets.contains_key(&cfg.profile_key(p)) {
+                    "yours"
+                } else {
+                    "the default"
+                }
             );
             println!("  °C            {}", anchors.concat());
-            println!("  fan 1 (CPU) % {}", row(&cfg.fan.cpu));
-            println!("  fan 2 (GPU) % {}", row(&cfg.fan.gpu));
+            println!("  fan 1 (CPU) % {}", row(&set.cpu));
+            println!("  fan 2 (GPU) % {}", row(&set.gpu));
             println!(
                 "  (linear between the points; at {} °C or with no sensor both fans run at 100 %)",
                 control::FAN_PANIC_C
@@ -976,7 +1004,6 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
         }
         CustomFanCmd::On => {
             cfg.fan.enabled = true;
-            cfg.fan.validate()?;
             cfg.save()?;
             // the engine leaves a boost alone, so end it first or the profile would never take over
             if let Ok(mut ec) = open_ec(cli) {
@@ -997,30 +1024,37 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
             control::fan_release(open_ec(cli)?.as_mut())?;
             println!("custom fan profile off, fans handed back to the firmware");
         }
-        CustomFanCmd::Set { cpu, gpu } => {
+        CustomFanCmd::Set { cpu, gpu, profile } => {
             let arr = |v: &Vec<u8>| {
                 <[u8; 5]>::try_from(v.as_slice())
                     .map_err(|_| "need exactly five values".to_string())
             };
-            let mut new = cfg.fan.clone();
+            let p = fan_profile(cli, &cfg, profile)?;
+            let mut set = cfg.fan_set(p);
             if let Some(v) = cpu {
-                new.cpu = arr(v)?;
+                set.cpu = arr(v)?;
             }
             if let Some(v) = gpu {
-                new.gpu = arr(v)?;
+                set.gpu = arr(v)?;
             }
-            new.validate()?;
-            cfg.fan = new;
+            set.validate()?;
+            cfg.set_fan_set(p, set);
             cfg.save()?;
-            println!("curves saved (on at {:?} °C)", control::FAN_ANCHORS);
+            println!(
+                "curves of {} saved (on at {:?} °C)",
+                profile_label(&cfg, p),
+                control::FAN_ANCHORS
+            );
         }
-        CustomFanCmd::Reset => {
-            cfg.fan = control::FanCurves {
-                enabled: cfg.fan.enabled,
-                ..control::FanCurves::default()
-            };
+        CustomFanCmd::Reset { profile } => {
+            let p = fan_profile(cli, &cfg, profile)?;
+            let default = cfg.fan_default(p);
+            cfg.set_fan_set(p, default);
             cfg.save()?;
-            println!("curves back to the default preset");
+            println!(
+                "curves of {} back to the default preset",
+                profile_label(&cfg, p)
+            );
         }
         CustomFanCmd::Run { seconds } => {
             static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

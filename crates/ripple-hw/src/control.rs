@@ -4,6 +4,7 @@
 //! load), fan boost via the 0x40 bit of EC 1873, mode button = WMI event 176 =
 //! key 184 (KEY_F14) on the "Uniwill WMI hotkeys" input device.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use ripple_core::modes::{FanControlByte, OperatingMode};
@@ -291,9 +292,13 @@ pub struct Config {
     /// Software fan policy: boost the fans above this CPU temperature (°C), `None` = off.
     #[serde(default)]
     pub auto_boost_above: Option<u8>,
-    /// The custom fan profile (software curves, run by the daemon).
+    /// Is the custom fan profile on (the daemon drives the fans from the curves)? Older versions kept one
+    /// pair of curves here; they are per profile now, in `fan_sets`.
     #[serde(default)]
-    pub fan: FanCurves,
+    pub fan: FanSwitch,
+    /// The user's fan curves per profile (`profile_key`). A profile with no entry has the default of its mode.
+    #[serde(default)]
+    pub fan_sets: BTreeMap<String, FanSet>,
     /// Backlight level (1..=4) the keyboard had before "off", to come back to.
     #[serde(default)]
     pub keyboard_level: Option<u8>,
@@ -319,7 +324,8 @@ impl Config {
                 custom: None,
                 keyboard: None,
                 auto_boost_above: None,
-                fan: FanCurves::default(),
+                fan: FanSwitch::default(),
+                fan_sets: BTreeMap::new(),
                 keyboard_level: None,
                 touchpad_on: true,
             });
@@ -340,8 +346,57 @@ impl Config {
             }
         }
         self.profiles.retain(|c| c.preset.validate().is_ok());
-        if self.fan.validate().is_err() {
-            self.fan = FanCurves::default(); // also switches it off
+        self.fan_sets.retain(|_, set| set.validate().is_ok());
+    }
+
+    /// The key a profile's own settings are saved under: the stock mode's name, or the profile's name.
+    pub fn profile_key(&self, p: Profile) -> String {
+        match p {
+            Profile::Stock(m) => m.as_str().to_string(),
+            Profile::Custom(i) => self
+                .profiles
+                .get(i)
+                .map_or_else(|| "gaming".to_string(), |c| c.name.clone()),
+        }
+    }
+
+    /// The default fan curves of a profile: those of its mode (of the mode it started from, for yours).
+    pub fn fan_default(&self, p: Profile) -> FanSet {
+        let mode = match p {
+            Profile::Stock(m) => m,
+            Profile::Custom(i) => self
+                .profiles
+                .get(i)
+                .map_or(OperatingMode::Gaming, |c| c.base),
+        };
+        default_fan_set(mode)
+    }
+
+    /// The fan curves of a profile: the user's own for it, else the default.
+    pub fn fan_set(&self, p: Profile) -> FanSet {
+        self.fan_sets
+            .get(&self.profile_key(p))
+            .copied()
+            .unwrap_or_else(|| self.fan_default(p))
+    }
+
+    /// What the engine runs for a profile: its curves, on or off as the switch says.
+    pub fn fan_curves(&self, p: Profile) -> FanCurves {
+        let set = self.fan_set(p);
+        FanCurves {
+            enabled: self.fan.enabled,
+            cpu: set.cpu,
+            gpu: set.gpu,
+        }
+    }
+
+    /// Keep a profile's curves; the default is not stored, so it stays the default if that ever changes.
+    pub fn set_fan_set(&mut self, p: Profile, set: FanSet) {
+        let key = self.profile_key(p);
+        if set == self.fan_default(p) {
+            self.fan_sets.remove(&key);
+        } else {
+            self.fan_sets.insert(key, set);
         }
     }
 
@@ -812,6 +867,52 @@ impl FanCurves {
     }
 }
 
+/// Whether the custom fan profile is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FanSwitch {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// One profile's two curves: duty in percent at each of `FAN_ANCHORS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanSet {
+    /// Fan 1, driven by the CPU temperature.
+    pub cpu: [u8; 5],
+    /// Fan 2, driven by the GPU temperature.
+    pub gpu: [u8; 5],
+}
+
+impl FanSet {
+    pub fn validate(&self) -> Result<(), String> {
+        FanCurves {
+            enabled: false,
+            cpu: self.cpu,
+            gpu: self.gpu,
+        }
+        .validate()
+    }
+}
+
+/// The fan curves the Windows app starts each mode with, read off its Fan Settings page (Balanced = Office,
+/// Enthusiast = Gaming, Overboost = Turbo; Gaming and Turbo are the same). The app draws its points evenly
+/// spaced, not at temperatures, so they are taken here at 5 °C steps from 40 to 85 °C (its own tables for
+/// other models end at about 85 °C); at the five anchors that is 30 / 35 / 48 / 55 / 85 % for the CPU fan,
+/// the GPU fan staying off to 45 °C in Gaming and Turbo. Office tops out at 55 % there; that is 60 % here,
+/// the floor every curve keeps at 85 °C.
+pub fn default_fan_set(mode: OperatingMode) -> FanSet {
+    match mode {
+        OperatingMode::Office => FanSet {
+            cpu: [30, 35, 48, 55, FAN_MIN_AT_TOP],
+            gpu: [30, 35, 48, 55, FAN_MIN_AT_TOP],
+        },
+        OperatingMode::Gaming | OperatingMode::Turbo => FanSet {
+            cpu: [30, 35, 48, 55, 85],
+            gpu: [0, 35, 48, 55, 85],
+        },
+    }
+}
+
 /// Duty (percent) of `curve` at `temp_c`: linear between the anchors, flat outside them.
 pub fn curve_duty(curve: &[u8; 5], temp_c: f64) -> u8 {
     let a = FAN_ANCHORS.map(f64::from);
@@ -1092,11 +1193,15 @@ pub fn fan_loop(stop: &std::sync::atomic::AtomicBool) {
         );
     };
     let mut engine = FanEngine::default();
+    let stock = stock(Some(ec.as_mut()));
     let mut last_err = String::new(); // a persistent error is reported once, not every tick
     while !stop.load(Relaxed) {
-        let cfg = Config::load().fan;
+        // each profile has its own curves: the ones of what is running (Gaming's when it matches none)
+        let cfg = Config::load();
+        let now = running(ec.as_mut(), &stock, &cfg.profiles).ok().flatten();
+        let curves = cfg.fan_curves(now.unwrap_or(Profile::Stock(OperatingMode::Gaming)));
         let (cpu, gpu) = sysfs.sensors().map_or((None, None), |s| cpu_gpu_temps(&s));
-        match engine.tick(ec.as_mut(), &cfg, cpu, gpu) {
+        match engine.tick(ec.as_mut(), &curves, cpu, gpu) {
             Ok(()) => last_err.clear(),
             Err(e) if e.to_string() != last_err => {
                 last_err = e.to_string();
@@ -1977,6 +2082,79 @@ mod tests {
             current(&mut ec, &st, &customs, Some(7)).unwrap(),
             Some(Profile::Stock(Gaming))
         );
+    }
+
+    #[test]
+    fn the_default_fan_curves_are_valid_and_follow_the_windows_app() {
+        use OperatingMode::*;
+        for m in STOCK_MODES {
+            assert!(default_fan_set(m).validate().is_ok(), "{m:?}");
+        }
+        // the app draws the same curves for Enthusiast and Overboost
+        assert_eq!(default_fan_set(Gaming), default_fan_set(Turbo));
+        let gaming = default_fan_set(Gaming);
+        assert_eq!(gaming.cpu, [30, 35, 48, 55, 85]);
+        assert_eq!(gaming.gpu, [0, 35, 48, 55, 85]); // the GPU fan stays off to 45 °C
+                                                     // between the anchors the app's 70 % point at 80 °C is where the line passes
+        assert_eq!(curve_duty(&gaming.cpu, 80.0), 70);
+        // Balanced draws one curve for both fans, ending at 55 %: 60 here, the floor
+        let office = default_fan_set(Office);
+        assert_eq!(office.cpu, office.gpu);
+        assert_eq!(office.cpu, [30, 35, 48, 55, FAN_MIN_AT_TOP]);
+    }
+
+    #[test]
+    fn fan_curves_belong_to_a_profile() {
+        use OperatingMode::*;
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"profiles":[{"name":"Profile 1","base":"turbo","preset":{"pl1":50,"pl2":50,"pl4":100,"ctgp":0}}]}"#,
+        )
+        .unwrap();
+        cfg.settle();
+        let (office, gaming, mine) = (
+            Profile::Stock(Office),
+            Profile::Stock(Gaming),
+            Profile::Custom(0),
+        );
+        // no entry: the default of the mode, of the mode it started from for your own
+        assert_eq!(cfg.fan_set(office), default_fan_set(Office));
+        assert_eq!(cfg.fan_set(mine), default_fan_set(Turbo));
+        // an edit belongs to that profile alone
+        let mut set = cfg.fan_set(gaming);
+        set_curve_point(&mut set.cpu, 2, 60);
+        cfg.set_fan_set(gaming, set);
+        assert_eq!(cfg.fan_set(gaming), set);
+        assert_eq!(cfg.fan_set(office), default_fan_set(Office));
+        assert_eq!(cfg.fan_set(mine), default_fan_set(Turbo));
+        assert_eq!(cfg.profile_key(mine), "Profile 1");
+        // putting the default back leaves nothing stored
+        cfg.set_fan_set(gaming, default_fan_set(Gaming));
+        assert!(cfg.fan_sets.is_empty());
+        // what the engine gets: the profile's curves and the one on/off switch
+        cfg.fan.enabled = true;
+        let curves = cfg.fan_curves(mine);
+        assert!(curves.enabled);
+        assert_eq!(curves.cpu, default_fan_set(Turbo).cpu);
+        // a profile that is gone falls back to Gaming
+        assert_eq!(cfg.fan_set(Profile::Custom(9)), default_fan_set(Gaming));
+    }
+
+    #[test]
+    fn an_older_fan_config_keeps_its_switch_and_a_broken_set_is_dropped() {
+        // older versions kept one pair of curves next to the switch: only the switch counts now
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"fan":{"enabled":true,"cpu":[20,30,45,70,100],"gpu":[0,25,40,65,100]},
+                "fan_sets":{"gaming":{"cpu":[1,2,3,4,5],"gpu":[0,0,0,0,100]},
+                            "turbo":{"cpu":[30,35,48,55,85],"gpu":[0,35,48,55,90]}}}"#,
+        )
+        .unwrap();
+        cfg.settle();
+        assert!(cfg.fan.enabled);
+        // the first is under the floor at 85 °C and dropped, the second kept
+        assert_eq!(cfg.fan_sets.keys().collect::<Vec<_>>(), ["turbo"]);
+        assert!(!serde_json::to_string(&cfg)
+            .unwrap()
+            .contains("[20,30,45,70,100]"));
     }
 
     #[test]

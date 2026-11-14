@@ -869,7 +869,10 @@ fn paint_chart(
     p: Palette,
     shown: &[u8; 5],
     active: Option<usize>,
+    dim: bool,
 ) {
+    // curves that cannot be edited are drawn in the muted colour
+    let ink = if dim { p.muted } else { p.accent };
     let (x0, y0) = (f32::from(b.origin.x), f32::from(b.origin.y));
     let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
     let at = |temp: f32, duty: f32| {
@@ -901,7 +904,7 @@ fn paint_chart(
     area.line_to(at(chart::T_MAX, 0.));
     area.close();
     if let Ok(path) = area.build() {
-        window.paint_path(path, rgba((p.accent << 8) | 0x33));
+        window.paint_path(path, rgba((ink << 8) | 0x33));
     }
     let mut line = PathBuilder::stroke(px(2.));
     line.move_to(at(pts[0].0, pts[0].1));
@@ -909,7 +912,7 @@ fn paint_chart(
         line.line_to(at(*t, *d));
     }
     if let Ok(path) = line.build() {
-        window.paint_path(path, rgb(p.accent));
+        window.paint_path(path, rgb(ink));
     }
     for (i, d) in shown.iter().enumerate() {
         let c = at(f32::from(control::FAN_ANCHORS[i]), f32::from(*d));
@@ -917,7 +920,7 @@ fn paint_chart(
         window.paint_quad(quad(
             Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)),
             Corners::all(r),
-            rgb(p.accent),
+            rgb(ink),
             Edges::all(px(2.)),
             rgb(p.panel),
             BorderStyle::Solid,
@@ -1573,7 +1576,7 @@ impl Ui {
                     .child(mode_button(cx, "fan-custom", "Custom", FanMode::Custom))
                     .child(mode_button(cx, "fan-boost", "Boost", FanMode::Boost)),
             )
-            .child(note(p, "Auto: the firmware's own curve. Custom: your curves below, any time. Boost: both fans at full speed."));
+            .child(note(p, "Auto: the firmware's own curve. Custom: your curves for the running profile below, any time. Boost: both fans at full speed."));
 
         let mut fans = section(p, "Sensors");
         if s.temps.is_empty() && s.fans.is_empty() {
@@ -1631,23 +1634,46 @@ impl Ui {
                 "Boost on at the threshold, off 8 °C lower. Runs while this app is open.",
             ));
 
-        let mut profile = section(p, "Custom fan profile")
-            .child(
+        // Every profile has its own curves. Custom shows those of the running profile, to edit; Auto and Boost
+        // show the Windows app's default for its mode, which cannot be changed.
+        let running = s.profile.unwrap_or(Profile::Stock(OperatingMode::Gaming));
+        let edit = s.fan.enabled.then_some(running);
+        let (cpu_duty, gpu_duty) = if s.fan.enabled {
+            (s.fan.cpu, s.fan.gpu)
+        } else {
+            (s.fan_default.cpu, s.fan_default.gpu)
+        };
+        let mut profile = section(p, &format!("Fan curves: {}", s.label(running)));
+        if edit.is_some() {
+            profile = profile.child(
                 div().flex().gap_2().child(
-                    button(p, "fan-default", "Default preset", false).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.reset_fan_curves()))),
+                    button(
+                        p,
+                        "fan-default",
+                        format!("Default preset ({})", s.mode_name(running)),
+                        false,
+                    )
+                    .on_click(cx.listener(move |ui, _, _, cx| {
+                        ui.act(cx, move |hw| hw.reset_fan_curves(running))
+                    })),
                 ),
-            )
-            .child(note(
-                p,
-                format!("Drag the dots: duty at each temperature, linear in between. The curve never falls and stays at {} % or more from {} °C. Fan 1 follows the CPU temperature, fan 2 the GPU's; both run at 100 % from {} °C or without a sensor.", control::FAN_MIN_AT_TOP, control::FAN_ANCHORS[4], control::FAN_PANIC_C),
-            ));
+            );
+        }
+        profile = profile.child(note(
+            p,
+            if edit.is_some() {
+                format!("Drag the dots: duty at each temperature, linear in between. The curve never falls and stays at {} % or more from {} °C. Fan 1 follows the CPU temperature, fan 2 the GPU's; both run at 100 % from {} °C or without a sensor.", control::FAN_MIN_AT_TOP, control::FAN_ANCHORS[4], control::FAN_PANIC_C)
+            } else {
+                format!("The curves can only be changed in Custom mode. Shown here: the Windows app's default for {}, about what the firmware runs.", s.mode_name(running))
+            },
+        ));
         if s.fan.enabled && !s.service {
             profile = profile.child(
                 div().p_3().rounded_md().bg(rgb(p.err_bg)).text_color(rgb(p.red)).child("The curves are applied by the ripple-nova service, which is not running (./install.sh)."),
             );
         }
-        let cpu = self.fan_curve(cx, "Fan 1 (CPU) curve", 0, s.fan.cpu);
-        let gpu = self.fan_curve(cx, "Fan 2 (GPU) curve", 1, s.fan.gpu);
+        let cpu = self.fan_curve(cx, "Fan 1 (CPU) curve", 0, cpu_duty, edit);
+        let gpu = self.fan_curve(cx, "Fan 2 (GPU) curve", 1, gpu_duty, edit);
 
         div()
             .flex()
@@ -1662,24 +1688,35 @@ impl Ui {
             .into_any_element()
     }
 
-    /// One fan's duty curve (fan 0 = CPU, 1 = GPU) as a chart: drag a dot up or down, or press
-    /// anywhere to take the dot of the nearest column. Every dot is a vertical slider over the same
-    /// plot, so the debounce, the release and the hardware job are the sliders'.
-    fn fan_curve(&self, cx: &mut Context<Self>, title: &str, fan: usize, duty: [u8; 5]) -> Div {
+    /// One fan's duty curve (fan 0 = CPU, 1 = GPU) as a chart. With `edit` (the profile whose curve it
+    /// is) you drag a dot up or down, or press anywhere to take the dot of the nearest column; every dot
+    /// is a vertical slider over the same plot, so the debounce, the release and the hardware job are the
+    /// sliders'. Without it the curve is only shown, dimmed.
+    fn fan_curve(
+        &self,
+        cx: &mut Context<Self>,
+        title: &str,
+        fan: usize,
+        duty: [u8; 5],
+        edit: Option<Profile>,
+    ) -> Div {
         const H: f32 = 180.;
         const AXIS_W: f32 = 36.;
         const GUTTER_W: f32 = 32.;
         let p = self.p();
         let ids = FAN_IDS[fan];
         let bounds = self.sliders.borrow().get(ids[0]).and_then(|r| r.bounds);
-        for (i, d) in duty.into_iter().enumerate() {
+        for (i, d) in duty.into_iter().enumerate().filter(|_| edit.is_some()) {
+            let profile = edit.unwrap_or(Profile::Stock(OperatingMode::Gaming));
             self.sliders.borrow_mut().insert(
                 ids[i],
                 SliderReg {
                     bounds,
                     n: 101,
                     value: usize::from(d),
-                    pick: Rc::new(move |k| Box::new(move |hw| hw.set_fan_point(fan, i, k as u8))),
+                    pick: Rc::new(move |k| {
+                        Box::new(move |hw| hw.set_fan_point(profile, fan, i, k as u8))
+                    }),
                     vertical: true,
                     // the last point never goes below the floor the profile demands
                     lo: if i == 4 {
@@ -1691,9 +1728,8 @@ impl Ui {
             );
         }
         // while dragging, show the curve the way it will be saved: the other dots move along
-        let held = self
-            .slider
-            .thumb
+        let held = edit
+            .and(self.slider.thumb)
             .and_then(|(id, k)| ids.iter().position(|x| *x == id).map(|i| (i, k)));
         let mut shown = duty;
         if let Some((i, k)) = held {
@@ -1706,13 +1742,14 @@ impl Ui {
             .relative()
             .flex_1()
             .h(px(H))
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |ui, e: &MouseDownEvent, _, cx| {
-                    ui.chart_press(fan, (f32::from(e.position.x), f32::from(e.position.y)), cx)
-                }),
-            )
+            .when_some(edit, |d, _| {
+                d.cursor_pointer().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |ui, e: &MouseDownEvent, _, cx| {
+                        ui.chart_press(fan, (f32::from(e.position.x), f32::from(e.position.y)), cx)
+                    }),
+                )
+            })
             .child(
                 canvas(
                     move |b, _, _| {
@@ -1722,7 +1759,9 @@ impl Ui {
                             }
                         }
                     },
-                    move |b, _, window, _| paint_chart(window, b, p, &shown, held.map(|(i, _)| i)),
+                    move |b, _, window, _| {
+                        paint_chart(window, b, p, &shown, held.map(|(i, _)| i), edit.is_none())
+                    },
                 )
                 .absolute()
                 .size_full(),

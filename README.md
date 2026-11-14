@@ -47,8 +47,10 @@ on a real laptop.
   PL1/PL2/PL4/cTGP, and can be reset to the stock mode it came from or deleted). The hardware button is followed, the lights follow the profile, and
   the profile the EC is running is recognised at boot.
 - **Fans**: Auto (firmware), Boost, and a **Custom fan profile**: two curves (fan 1 = CPU fan, fan 2 = GPU fan), five
-  points each at 45/55/65/75/85 °C (dragged on a chart in the window), independent of the profile, switchable off any time, with a default preset and
-  failsafes (see [fans](#custom-fan-profile)). Plus an auto-boost threshold in the window.
+  points each at 45/55/65/75/85 °C (dragged on a chart in the window), switchable off any time, failsafes (see
+  [fans](#custom-fan-profile)). **Every profile has its own curves**, starting from the Windows app's defaults for its
+  mode (Office tops out lower than Gaming and Turbo); "Default preset" goes back to those, and the curves can only be
+  changed in Custom mode. Plus an auto-boost threshold in the window.
 - **Keyboard backlight** (EC solution): colour (hue/saturation/brightness), static rainbow, off.
 - **Platform toggles** (System tab): Fn lock, Super key and the others below. The **Device** tab has the touchpad: a **Touchpad power** switch (off = the touchpad is powered down: no
   pointer, its LED lights, as it does in suspend; bring it back with the toggle or `sudo -n rcc touchpad on|toggle`,
@@ -194,8 +196,10 @@ The daemon is a separate root systemd service; it needs no rule.
 
 ## Custom fan profile
 
-Switch it on in the Fan tab (or `rcc fan custom on`). The daemon drives both fans from your two curves; anything
-else about the machine (profile, lights) is unchanged. Safety rules, all enforced in code:
+Switch it on in the Fan tab (or `rcc fan custom on`). The daemon drives both fans from the two curves of the profile
+that is running (each profile keeps its own; the default is the Windows app's for its mode, read off its Fan Settings
+page: its points are drawn evenly spaced, so they sit here at 5 °C steps from 40 to 85 °C). Anything else about the
+machine (profile, lights) is unchanged. Safety rules, all enforced in code:
 
 - at 90 °C on either sensor, or with no readable sensor, **both fans run at 100 %**;
 - a curve must reach at least 60 % at 85 °C and may never fall as the temperature rises;
@@ -213,7 +217,7 @@ sudo rcc status                      # profile, limits, temperatures, fans, batt
 sudo rcc mode get | set office|gaming|turbo|"<profile name>" | next | list
 sudo rcc mode custom "Profile 1" 45 50 --pl4 120 --ctgp 5  # make or change one of your profiles; reset-custom <name> / delete <name>
 sudo rcc fan boost on|off            # refused while the custom fan profile is on
-sudo rcc fan custom show|on|off|set --cpu 20,30,45,70,100 --gpu 0,25,40,65,100|reset
+sudo rcc fan custom show|on|off|reset|set --cpu 30,35,48,55,85 --gpu 0,35,48,55,85   # --profile <office|gaming|turbo|name>, default: the running one
 sudo rcc rgb color ff8800 | rainbow on|off | backlight on|off | brightness 60
 sudo rcc touchpad on|off|toggle|status
 sudo rcc popups [on|off]
