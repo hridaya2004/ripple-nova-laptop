@@ -78,10 +78,11 @@ impl Profile {
     /// with no known meaning (0x4 is fan boost; 0x2 and 0x8 were seen before an app took control).
     pub fn from_mode_byte(byte: u8) -> Option<Self> {
         match byte >> 4 {
-            // 0xE and 0x7 are Balanced and Overboost with the custom fan engine's manual bit on top
+            // 0xE, 0x7 and 0x5 are Office and Turbo with the custom fan engine's manual bit on top
             0xA | 0xE => Some(Self::Stock(OperatingMode::Office)),
             0x0 => Some(Self::Stock(OperatingMode::Gaming)),
-            0x3 | 0x7 => Some(Self::Stock(OperatingMode::Turbo)),
+            // 0x1 is how the Windows app leaves Turbo (EC 0x10, the OEM's "turbo"); we write 0x3
+            0x1 | 0x3 | 0x5 | 0x7 => Some(Self::Stock(OperatingMode::Turbo)),
             _ => None,
         }
     }
@@ -1573,6 +1574,9 @@ mod tests {
         assert_eq!(cur((0, 0), 0x00), Some(Profile::Stock(Gaming)));
         assert_eq!(cur((0, 0), 0xA7), Some(Profile::Stock(Office)));
         assert_eq!(cur((0, 0), 0x37), Some(Profile::Stock(Turbo)));
+        // measured after a Windows session in Turbo: PL regs 0/0, mode byte 0x10
+        assert_eq!(cur((0, 0), 0x10), Some(Profile::Stock(Turbo)));
+        assert_eq!(cur((0, 0), 0x57), Some(Profile::Stock(Turbo)));
         // fan boost (0x4_) and nibbles with no known meaning stay unknown
         assert_eq!(cur((0, 0), 0x47), None);
         assert_eq!(cur((0, 0), 0x20), None);
