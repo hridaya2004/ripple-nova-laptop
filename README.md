@@ -210,7 +210,7 @@ sudo reboot
 - **Secure Boot with a unified kernel image signed by `sbctl`**: sbctl's mkinitcpio hook signs the rebuilt image
   (`sudo sbctl verify` lists nothing unsigned). Before installing, keep a signed copy of the working image: systemd-boot
   then offers it as a second entry (press a key in the 20 s menu) if the new one does not come up:
-  `sudo cp -p /boot/EFI/Linux/arch-linux.efi /boot/EFI/Linux/arch-linux-pre-nvidia.efi`.
+  `sudo cp -p /boot/EFI/Linux/arch-linux.efi /boot/EFI/Linux/arch-linux-nouveau.efi`.
 - An external monitor on the laptop's HDMI/DisplayPort is wired to the NVIDIA GPU: it is the first thing that goes
   dark if the driver does not load. The internal panel is on the Intel GPU.
 - `modeset` is on by default in the packaged driver (`modinfo -p nvidia_drm`).
