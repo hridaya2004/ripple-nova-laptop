@@ -30,7 +30,7 @@ use hw::{FanMode, Field, Hw, Snapshot, STOCK_PROFILES};
 use input::{Outcome, TextInput};
 use ripple_core::modes::OperatingMode;
 use ripple_hw::control::{self, Hsv, Profile};
-use ripple_hw::notify::{ensure_tray, is_experimental, popups_enabled, toggle_label};
+use ripple_hw::notify::{ensure_tray, popups_enabled, toggle_label};
 use settings::Settings;
 
 /// Zed's One Dark / One Light, reduced to what this UI uses.
@@ -925,8 +925,8 @@ fn paint_chart(
     }
 }
 
-/// The toggles that belong to the Device tab: the touchpad's power switch and the firmware's own toggle.
-const DEVICE_TOGGLES: [&str; 2] = ["touchpad", "touchpad_toggle_enable"];
+/// The toggles that belong to the Device tab: the touchpad's power switch.
+const DEVICE_TOGGLES: [&str; 1] = ["touchpad"];
 
 fn toggle_description(name: &str) -> &str {
     match name {
@@ -1966,8 +1966,8 @@ impl Ui {
             .into_any_element()
     }
 
-    /// One platform toggle: its name (and "experimental" when its effect is not established), what it
-    /// does, and a switch. `i` is its place in the snapshot's toggle list.
+    /// One platform toggle: its name, what it does, and a switch. `i` is its place in the snapshot's
+    /// toggle list.
     fn toggle_row(&self, cx: &mut Context<Self>, i: usize, name: &'static str, on: bool) -> Div {
         let p = self.p();
         div()
@@ -1977,21 +1977,7 @@ impl Ui {
             .gap_4()
             .child(
                 div()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(toggle_label(name))
-                            .when(is_experimental(name), |d| {
-                                d.child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(rgb(p.muted))
-                                        .child("experimental"),
-                                )
-                            }),
-                    )
+                    .child(toggle_label(name))
                     .child(note(p, toggle_description(name))),
             )
             .child(switch(p, ("toggle", i), on).on_click(
@@ -1999,7 +1985,7 @@ impl Ui {
             ))
     }
 
-    /// The touchpad: its power switch and the firmware's own toggle.
+    /// The touchpad's power switch.
     fn device_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p();
         let mine = self
@@ -2012,10 +1998,7 @@ impl Ui {
             .collect::<Vec<_>>();
         let mut touchpad = section(p, "Touchpad");
         if mine.is_empty() {
-            touchpad = touchpad.child(note(
-                p,
-                "No Uniwill touchpad found (no i2c-UNIW* device, and no touchpad toggle in the kernel driver here).",
-            ));
+            touchpad = touchpad.child(note(p, "No Uniwill touchpad found (no i2c-UNIW* device)."));
         } else {
             for (i, (name, on)) in mine {
                 touchpad = touchpad.child(self.toggle_row(cx, i, name, on));

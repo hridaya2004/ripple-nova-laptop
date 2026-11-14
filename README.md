@@ -53,7 +53,7 @@ on a real laptop.
 - **Platform toggles** (System tab): Fn lock, Super key and the others below. The **Device** tab has the touchpad: a **Touchpad power** switch (off = the touchpad is powered down: no
   pointer, its LED lights, as it does in suspend; bring it back with the toggle or `sudo -n rcc touchpad on|toggle`,
   which the sudoers rule allows without a password, for instance from a keyboard shortcut). AC Auto-Boot, USB
-  powershare, the firmware's Touchpad toggle and Touchpad power are marked *experimental*. Breathing in suspend is a
+  powershare and the firmware's own Touchpad toggle are also there. Breathing in suspend is a
   lightbar feature: it only shows on a machine whose EC reports a lightbar.
 - **Tray**: click the icon to open the window. Its menu has a **Performance profile** shortcut (the current profile
   ticked, "service not running" when the daemon is down) and an **Enable / Disable notifications** item. Without the sudoers rule,

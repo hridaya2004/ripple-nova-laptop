@@ -166,18 +166,6 @@ fn with_popups(json: &str, on: bool) -> serde_json::Value {
     v
 }
 
-/// Toggles whose effect is not established on every machine (or was not seen here): the window marks them.
-pub fn is_experimental(name: &str) -> bool {
-    matches!(
-        name,
-        "touchpad"
-            | "touchpad_toggle_enable"
-            | "breathing_in_suspend"
-            | "ac_auto_boot"
-            | "usb_powershare_high"
-    )
-}
-
 /// How a platform toggle is named in the window and in popups.
 pub fn toggle_label(name: &str) -> &str {
     match name {
@@ -275,17 +263,6 @@ mod tests {
         }
         assert_eq!(toggle_label("ac_auto_boot"), "AC Auto-Boot");
         assert_eq!(toggle_label("touchpad"), "Touchpad power"); // the touchpad switch is not a sysfs attribute
-                                                                // every toggle the user called experimental is marked, the plain ones are not
-        for name in [
-            "touchpad",
-            "touchpad_toggle_enable",
-            "breathing_in_suspend",
-            "ac_auto_boot",
-            "usb_powershare_high",
-        ] {
-            assert!(is_experimental(name), "{name}");
-        }
-        assert!(!is_experimental("fn_lock") && !is_experimental("super_key_enable"));
     }
 
     #[test]

@@ -953,9 +953,8 @@ fn cpu_gpu_temps(s: &crate::linux::Sensors) -> (Option<f64>, Option<f64>) {
 /// Does a platform attribute get a toggle? `ctgp_offset` belongs to the profiles; `rainbow_animation` (older
 /// drivers; the newer one made it an LED trigger) and `breathing_in_suspend` are lightbar animations and mean
 /// nothing without a lightbar, so they follow `has_lightbar` (the same test that shows the lightbar controls).
-/// The rest are shown on every machine, the doubtful one marked experimental in the window
-/// (`notify::is_experimental`): `touchpad_toggle_enable` (the firmware's double tap) did nothing visible on this
-/// laptop, and the real touchpad switch is `touchpad.rs`.
+/// The rest are shown on every machine. `touchpad_toggle_enable` (the firmware's double tap) did nothing visible
+/// on this laptop; the real touchpad switch is `touchpad.rs`.
 fn toggle_shown(name: &str, has_lightbar: bool) -> bool {
     match name {
         "ctgp_offset" => false,
