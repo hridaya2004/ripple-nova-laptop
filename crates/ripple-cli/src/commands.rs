@@ -7,7 +7,7 @@ use ripple_core::modes::OperatingMode;
 use ripple_core::regs::{addr, duty_from_ec};
 use ripple_core::rgb::RgbRegState;
 use ripple_hw::control::{self, Config, Hsv, Preset, Profile};
-use ripple_hw::{EcAccess, HwError};
+use ripple_hw::{EcAccess, HwError, HwResult};
 
 use crate::{
     Backend, BatteryCmd, Cli, CurveCmd, CustomFanCmd, DisplayCmd, EcCmd, FanCmd, ModeChoice,
@@ -837,7 +837,8 @@ fn watch(cli: &Cli) -> CmdResult {
     std::thread::spawn(|| control::popup_loop(&NEVER));
     // keeps the touchpad on or off as the user chose (an "off" does not survive a reboot by itself)
     std::thread::spawn(|| control::touchpad_loop(&NEVER));
-    let mut key = control::open_mode_key()?;
+    let retry = std::time::Duration::from_secs(10);
+    let mut key = open_waiting(control::open_mode_key, retry);
     let _lock = match control::follow_lock(false) {
         Some(l) => l,
         None => {
@@ -847,13 +848,62 @@ fn watch(cli: &Cli) -> CmdResult {
     };
     println!("watching the mode button (Ctrl+C to stop)");
     loop {
-        control::wait_mode_key(&mut key)?;
+        if let Err(e) = control::wait_mode_key(&mut key) {
+            eprintln!("mode button: {e}"); // the device went away (driver unloaded): wait for it again
+            key = open_waiting(control::open_mode_key, retry);
+            continue;
+        }
         // read again: profiles made in the window or with `rcc mode custom` since the last press count
         let cfg = Config::load();
-        let cur = control::running(ec.as_mut(), &stock, &cfg.profiles)?;
-        if let Err(e) = apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur)) {
+        let pressed = control::running(ec.as_mut(), &stock, &cfg.profiles)
+            .map_err(|e| e.to_string())
+            .and_then(|cur| {
+                apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur))
+            });
+        if let Err(e) = pressed {
             eprintln!("error: {e}"); // keep watching, a failed press must not kill the daemon
         }
+    }
+}
+
+/// `open`, again and again until it works. The mode button's device exists only while the kernel
+/// driver is loaded (it may come after the daemon starts, say after a rebuild for a new kernel), and
+/// the fan, popup and touchpad threads must not die with a missing device.
+fn open_waiting<T>(mut open: impl FnMut() -> HwResult<T>, pause: std::time::Duration) -> T {
+    let mut said = false;
+    loop {
+        match open() {
+            Ok(v) => return v,
+            Err(e) => {
+                if !said {
+                    eprintln!("mode button: {e}; trying again every {} s", pause.as_secs());
+                    said = true;
+                }
+                std::thread::sleep(pause);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_device_that_appears_late_is_waited_for() {
+        let mut tries = 0;
+        let got = open_waiting(
+            || {
+                tries += 1;
+                if tries < 3 {
+                    Err(HwError::Unavailable("not there yet".into()))
+                } else {
+                    Ok(tries)
+                }
+            },
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(got, 3);
     }
 }
 
