@@ -156,6 +156,7 @@ impl Ui {
         let slider = self.slider(
             cx,
             SliderSpec {
+                origin: None,
                 id: "auto-boost",
                 n: steps.len(),
                 value: sel,

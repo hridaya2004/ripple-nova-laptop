@@ -189,6 +189,7 @@ impl Ui {
         self.slider(
             cx,
             SliderSpec {
+                origin: None,
                 id,
                 n: steps.len(),
                 value: sel,

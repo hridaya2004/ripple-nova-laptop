@@ -49,6 +49,7 @@ impl Ui {
         let hue = self.slider(
             cx,
             SliderSpec {
+                origin: None,
                 id: "kb-hue",
                 n: 36,
                 value: usize::from(hsv.h / 10) % 36,
@@ -70,6 +71,7 @@ impl Ui {
         let sat = self.slider(
             cx,
             SliderSpec {
+                origin: None,
                 id: "kb-sat",
                 n: 11,
                 value: (usize::from(hsv.s) + 5) / 10,
@@ -90,6 +92,7 @@ impl Ui {
         let bright = self.slider(
             cx,
             SliderSpec {
+                origin: None,
                 id: "kb-bright",
                 n: 21,
                 value: (usize::from(hsv.v) + 2) / 5,

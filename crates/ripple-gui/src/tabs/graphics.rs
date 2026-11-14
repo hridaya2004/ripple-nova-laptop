@@ -8,6 +8,15 @@ fn steps(range: (i32, i32), by: usize) -> Vec<i32> {
     (range.0..=range.1).step_by(by).collect()
 }
 
+/// An offset with its direction in words and an arrow: the slider alone does not say it.
+fn offset_text(v: i32) -> String {
+    match v.cmp(&0) {
+        std::cmp::Ordering::Greater => format!("▲ +{v} MHz"),
+        std::cmp::Ordering::Less => format!("▼ {v} MHz"),
+        std::cmp::Ordering::Equal => "0 MHz".to_string(),
+    }
+}
+
 /// The slider position closest to `value`.
 fn nearest(steps: &[i32], value: i32) -> usize {
     steps
@@ -50,6 +59,15 @@ impl Ui {
             .child(row(p, "Memory clock", mhz(s.mem_mhz)))
             .child(row(
                 p,
+                "Offsets in force",
+                format!(
+                    "core {}, memory {}",
+                    offset_text(s.core_offset),
+                    offset_text(s.mem_offset)
+                ),
+            ))
+            .child(row(
+                p,
                 "Performance state",
                 s.pstate.map_or("n/a".to_string(), |v| format!("P{v}")),
             ))
@@ -62,13 +80,17 @@ impl Ui {
         let mem_steps = steps(MEM_RANGE_MHZ, 50);
         let core_at = nearest(&core_steps, t.core_mhz);
         let mem_at = nearest(&mem_steps, t.mem_mhz);
+        let zero_core = nearest(&core_steps, 0);
+        let zero_mem = nearest(&mem_steps, 0);
         let core_labels = vec![
             (0, format!("{}", CORE_RANGE_MHZ.0)),
-            (core_steps.len() - 1, format!("{}", CORE_RANGE_MHZ.1)),
+            (zero_core, "0".to_string()),
+            (core_steps.len() - 1, format!("+{}", CORE_RANGE_MHZ.1)),
         ];
         let mem_labels = vec![
             (0, format!("{}", MEM_RANGE_MHZ.0)),
-            (mem_steps.len() - 1, format!("{}", MEM_RANGE_MHZ.1)),
+            (zero_mem, "0".to_string()),
+            (mem_steps.len() - 1, format!("+{}", MEM_RANGE_MHZ.1)),
         ];
         let core = self.slider(
             cx,
@@ -76,6 +98,7 @@ impl Ui {
                 id: "gpu-core",
                 n: core_steps.len(),
                 value: core_at,
+                origin: Some(zero_core),
                 fill: false,
                 labels: core_labels,
                 cells: None,
@@ -91,6 +114,7 @@ impl Ui {
                 id: "gpu-mem",
                 n: mem_steps.len(),
                 value: mem_at,
+                origin: Some(zero_mem),
                 fill: false,
                 labels: mem_labels,
                 cells: None,
@@ -112,12 +136,12 @@ impl Ui {
                     ui.act(cx, move |hw| hw.set_gpu_enabled(on));
                 },
             ))
-            .child(row(p, "Core clock offset", format!("{:+} MHz", t.core_mhz)))
+            .child(row(p, "Core clock offset", offset_text(t.core_mhz)))
             .child(core)
             .child(row(
                 p,
                 "Memory clock offset",
-                format!("{:+} MHz", t.mem_mhz),
+                offset_text(t.mem_mhz),
             ))
             .child(mem)
             .child(div().flex().child(
@@ -162,5 +186,8 @@ mod tests {
         let mem = steps(MEM_RANGE_MHZ, 50);
         assert_eq!((mem[0], *mem.last().unwrap()), (-500, 1000));
         assert_eq!(nearest(&[], 5), 0);
+        assert_eq!(offset_text(50), "▲ +50 MHz");
+        assert_eq!(offset_text(-50), "▼ -50 MHz");
+        assert_eq!(offset_text(0), "0 MHz");
     }
 }

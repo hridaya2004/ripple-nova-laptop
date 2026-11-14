@@ -27,6 +27,9 @@ pub(crate) struct SliderSpec {
     pub(crate) labels: Vec<(usize, String)>,
     /// Paint the track as coloured cells instead (hue / saturation pickers).
     pub(crate) cells: Option<Vec<u32>>,
+    /// A slider with a zero in the middle (an offset): the position of the zero. The fill then runs from it to the
+    /// thumb, in the accent colour above it and in yellow below it, and the zero carries a mark.
+    pub(crate) origin: Option<usize>,
 }
 
 /// Which of `n` positions a pointer at `x` is over; the track spans `left..left + width`.
@@ -176,6 +179,11 @@ impl Ui {
         };
         let frac = |i: usize| i as f32 / (n - 1) as f32;
         let regs = self.sliders.clone();
+        // an offset slider is blue above its zero and yellow below it, wherever the thumb is
+        let tone = match spec.origin {
+            Some(o) if shown < o => p.yellow,
+            _ => p.accent,
+        };
 
         let mut inner = div()
             .absolute()
@@ -222,7 +230,30 @@ impl Ui {
                         .rounded_full()
                         .bg(rgb(p.border)),
                 );
-                if spec.fill {
+                if let Some(o) = spec.origin {
+                    // from the zero to the thumb: which side, and how far, is what an offset is
+                    let (lo, hi) = (o.min(shown), o.max(shown));
+                    inner = inner
+                        .child(
+                            div()
+                                .absolute()
+                                .left(relative(frac(lo)))
+                                .top(px(12.))
+                                .h(px(6.))
+                                .w(relative(frac(hi) - frac(lo)))
+                                .bg(rgb(tone)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left(relative(frac(o)))
+                                .ml(px(-1.))
+                                .top(px(8.))
+                                .w(px(2.))
+                                .h(px(14.))
+                                .bg(rgb(p.fg)),
+                        );
+                } else if spec.fill {
                     inner = inner.child(
                         div()
                             .absolute()
@@ -259,7 +290,7 @@ impl Ui {
                 .rounded_full()
                 .bg(rgb(p.popup))
                 .border_2()
-                .border_color(rgb(p.accent))
+                .border_color(rgb(tone))
                 .shadow_sm(),
         );
         for (i, text) in &spec.labels {
