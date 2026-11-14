@@ -81,7 +81,7 @@ on a real laptop.
 | Lightbar | this laptop has none (the kernel exposes one anyway; the controls are hidden) |
 | Display refresh rate (needs kscreen-doctor, xrandr or wlr-randr), display colour profiles, dGPU power / mux mode | not started. dGPU power needs a verified ACPI `_OFF`/`_ON` pair first: a wrong `_OFF` is risky, so it is not wired |
 | CPU thermal offset (TCC, EC 2008 holds the Gaming default, 2009 and 2010 the others) | read-only knowledge; writing it is not done. The stock service only writes it in a variant of this EC (0x786) that this model may not have |
-| The OEM's "Graphics Card" options: GPU core and memory clock offsets, GPU temperature target, the Dynamic Boost switch and value, "Unlock Configurable TGP" | not started. The clock offsets and the temperature target go through NVIDIA's NVML library, so they need [the NVIDIA driver](#the-nvidia-driver) (to be shown only when it is installed). cTGP and Dynamic Boost are EC registers (0x743 bits, 0x744, 0x746) that the kernel driver already sets up; only the NVIDIA driver applies them |
+| The OEM's "Graphics Card" options: GPU core and memory clock offsets, GPU temperature target, the Dynamic Boost switch and value, "Unlock Configurable TGP" | not started. The clock offsets and the temperature target go through NVIDIA's NVML library, so they need [the NVIDIA driver](#the-nvidia-driver) (to be shown only when it is installed). cTGP and Dynamic Boost are EC registers (0x743 bits, 0x744, 0x746) that the kernel driver already sets up; only the NVIDIA driver applies them: cTGP moves the GPU power limit (measured 60 W to 70 W for +10 W), Dynamic Boost is not confirmed on this model |
 | OSD, per-app profiles, process control, keyboard remap, gaming monitor, liquid cooling (Oasis) | OEM features, not planned yet |
 | Windows backend, MQTT interop with the OEM UI | out of scope for now |
 
@@ -182,6 +182,13 @@ driver (as far as we can tell it finds them through the `NVDA0820` firmware devi
 calls cTGP an offset "on top of the base TGP" and does not say who applies it). Nouveau does not read them and registers no GPU power or temperature sensor, so
 under nouveau the cTGP value is stored and you cannot see any effect. Nothing else in this project needs the NVIDIA
 driver; the window, the profiles, the fans and the keyboard work the same with nouveau.
+
+Measured on the XMG laptop this was developed on (RTX 3050 Ti Mobile, driver 620.70.06): `nvidia-smi` shows a 60 W
+power limit at cTGP offset 0 and 70 W at `rcc system set ctgp-offset 10` (maximum 95 W), within a few seconds and
+back at 0. **Dynamic Boost is not confirmed** there: the firmware does not answer NVIDIA's requests for a target
+temperature and a platform power mode (`NVRM ... failed to get target temp from SBIOS` in `journalctl -k`), and
+`nvidia-powerd` logs that the firmware asked it to disable the Dynamic Boost DC controller. Idle, the GPU sits at
+about 5 W (P8) because runtime D3 power management is off by default in the driver.
 
 Arch, with the stock `linux` kernel (Turing and newer GPUs; for another kernel use `nvidia-open-dkms`):
 
