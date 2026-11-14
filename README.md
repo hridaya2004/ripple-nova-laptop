@@ -54,7 +54,8 @@ on a real laptop.
 - **Keyboard backlight** (EC solution): colour (hue/saturation/brightness), static rainbow, off.
 - **Platform toggles** (System tab): Fn lock, Super key and the others below. The **Device** tab has the touchpad: a **Touchpad power** switch (off = the touchpad is powered down: no
   pointer, its LED lights, as it does in suspend; bring it back with the toggle or `sudo -n rcc touchpad on|toggle`,
-  which the sudoers rule allows without a password, for instance from a keyboard shortcut). AC Auto-Boot, USB
+  which the sudoers rule allows without a password, for instance from a keyboard shortcut; the switch also turns off, and the
+  popup says so, when the corner double tap silences the pad, see below). AC Auto-Boot, USB
   powershare and the firmware's own Touchpad toggle are also there. Breathing in suspend is a
   lightbar feature: it only shows on a machine whose EC reports a lightbar.
 - **Touchpad double tap**: a double tap in the touchpad's top-left corner switches it off and on, LED included, as on

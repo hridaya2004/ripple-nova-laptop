@@ -974,19 +974,20 @@ fn fan(cli: &Cli, cmd: &FanCmd) -> CmdResult {
 
 fn touchpad(choice: crate::TouchpadChoice) -> CmdResult {
     use crate::TouchpadChoice::*;
-    let now = ripple_hw::touchpad::is_on().ok_or("no Uniwill touchpad (i2c-UNIW*) found")?;
+    let powered = ripple_hw::touchpad::is_on().ok_or("no Uniwill touchpad (i2c-UNIW*) found")?;
+    // powered but silent: the corner double tap switched it off; that is "off" here and in the window too
+    let silent = powered && ripple_hw::touchpad::surface_on() == Some(false);
+    let now = powered && !silent;
     let want = match choice {
         On => true,
         Off => false,
         Toggle => !now,
         Status => {
-            // powered but silent: the corner double tap (or `on`) brings it back
-            let silent = now && ripple_hw::touchpad::surface_on() == Some(false);
             println!(
                 "touchpad: {}",
                 if silent {
                     "off (silenced by the double tap, LED on)"
-                } else if now {
+                } else if powered {
                     "on"
                 } else {
                     "off (powered down, LED on)"

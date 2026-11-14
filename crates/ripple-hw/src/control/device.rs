@@ -35,10 +35,17 @@ pub fn platform_toggles(u: &SysfsEc, has_lightbar: bool) -> Vec<(&'static str, b
             _ => None,
         })
         .collect();
-    if let Some(on) = crate::touchpad::is_on() {
+    if let Some(on) = touchpad_state(crate::touchpad::is_on(), crate::touchpad::surface_on()) {
         toggles.push(("touchpad", on));
     }
     toggles
+}
+
+/// What the touchpad switch shows: on only when the pad is powered (driver bound) and reporting. The corner
+/// double tap silences a powered pad (no pointer, LED lit), which is "off" for the user too. `None`: no touchpad.
+/// An unreadable surface switch (not root) counts as reporting.
+pub(super) fn touchpad_state(powered: Option<bool>, surface: Option<bool>) -> Option<bool> {
+    powered.map(|p| p && surface != Some(false))
 }
 
 /// Switch the touchpad on or off, now, and remember it: the daemon keeps the touchpad the way the user chose

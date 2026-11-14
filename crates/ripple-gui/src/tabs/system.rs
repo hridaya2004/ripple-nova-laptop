@@ -13,7 +13,7 @@ pub(crate) fn toggle_description(name: &str) -> &str {
         "usb_powershare_high" => {
             "Keep the USB ports powered when off (enabling it turns AC auto-boot off)"
         }
-        "touchpad" => "Off powers the touchpad down: no pointer, its LED lights (as in suspend)",
+        "touchpad" => "Off: no pointer and its LED lights. Switch it here or with the double tap in its top-left corner",
         "breathing_in_suspend" => {
             "Breathing LED animation while suspended on AC power (a lightbar feature)"
         }

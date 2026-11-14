@@ -203,13 +203,9 @@ pub fn touchpad_key_loop(stop: &std::sync::atomic::AtomicBool) {
             if typ != 1 || !chord.feed(code, value) {
                 continue;
             }
-            match crate::touchpad::toggle_surface() {
-                Ok(on) => {
-                    if crate::notify::popups_enabled() {
-                        crate::notify::send_to_logged_in("Touchpad", if on { "on" } else { "off" });
-                    }
-                }
-                Err(e) => eprintln!("touchpad gesture: {e}"),
+            // the popup loop sees the new state (the "Touchpad power" toggle) and says it
+            if let Err(e) = crate::touchpad::toggle_surface() {
+                eprintln!("touchpad gesture: {e}");
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(2)); // the device went away: look for it again

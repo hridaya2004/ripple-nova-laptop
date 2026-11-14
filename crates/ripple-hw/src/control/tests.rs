@@ -1046,3 +1046,13 @@ fn a_damaged_file_is_left_alone_and_a_failed_edit_writes_nothing() {
     assert!(Config::load_from(&path).touchpad_on);
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
+
+#[test]
+fn the_touchpad_switch_is_off_when_the_pad_is_silenced_as_well_as_when_it_is_powered_down() {
+    assert_eq!(touchpad_state(None, None), None); // no touchpad
+    assert_eq!(touchpad_state(Some(true), Some(true)), Some(true));
+    assert_eq!(touchpad_state(Some(true), None), Some(true)); // surface not readable: assume reporting
+    assert_eq!(touchpad_state(Some(true), Some(false)), Some(false)); // silenced by the double tap
+    assert_eq!(touchpad_state(Some(false), None), Some(false)); // powered down
+    assert_eq!(touchpad_state(Some(false), Some(false)), Some(false));
+}
