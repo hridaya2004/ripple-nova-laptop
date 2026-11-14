@@ -244,9 +244,14 @@ cargo fmt --all
 sudo ./target/debug/rcc doctor       # run the debug build as root (there is no mock EC any more)
 ```
 
-Layout: `crates/ripple-core` (register map, protocol, parsers), `crates/ripple-hw` (EC backends, profiles, fan
-engine, popups), `crates/ripple-cli` (`rcc`), `crates/ripple-gui` (`rcc-gui`), `crates/ripple-tray` (`rcc-tray`),
-`dist/` (service, launcher, sudoers, icon, desktop entries), `vendor/` (the `uniwill-laptop` subtree).
+Layout: `crates/ripple-core` (register map, protocol, parsers), `crates/ripple-hw` (EC backends; `control/` has
+the profiles, config, keyboard, fans, platform toggles and the daemon loops), `crates/ripple-cli` (`rcc`),
+`crates/ripple-gui` (`rcc-gui`; `tabs/` has one file per tab), `crates/ripple-tray` (`rcc-tray`), `dist/` (service,
+launcher, sudoers, icon, desktop entries), `vendor/` (the `uniwill-laptop` subtree).
+
+Files that several processes edit (`/etc/ripple-nova/config.json`, `gui.json`) are only changed through
+`Config::update` / `store::set_json_keys`: one locked read-modify-write, replaced atomically. Do not load, change and
+save a whole copy. CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, clippy with warnings denied, and the tests.
 
 `Cargo.lock` keeps `libc` at 0.2.189 on purpose: GPUI pulls in `xattr` 0.2.3, which needs `libc::ENOATTR`, and libc
 0.2.190 removed it on Linux. Do not run `cargo update -p libc` until GPUI moves to a newer `xattr`.
