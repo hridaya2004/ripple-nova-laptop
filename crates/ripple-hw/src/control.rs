@@ -6,12 +6,14 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::path::Path;
 
 use ripple_core::modes::{FanControlByte, OperatingMode};
 use ripple_core::regs::{addr, duty_from_ec, duty_to_ec};
 use serde::{Deserialize, Serialize};
 
 use crate::linux::SysfsEc;
+use crate::store;
 use crate::{EcAccess, HwError, HwResult};
 
 /// Hard ceiling for any PL1/PL2 we write: the stock app's own Turbo value for this
@@ -314,23 +316,39 @@ fn yes() -> bool {
 impl Config {
     pub const PATH: &'static str = "/etc/ripple-nova/config.json";
 
-    /// Saved config (unknown/old fields ignored, an invalid profile dropped), else defaults.
+    /// Saved config (unknown/old fields ignored, an invalid profile dropped), else defaults. For
+    /// reading: a damaged file reads as the defaults here, but `update` refuses to overwrite it.
     pub fn load() -> Self {
-        let mut cfg = std::fs::read_to_string(Self::PATH)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Self>(&t).ok())
-            .unwrap_or(Self {
-                profiles: Vec::new(),
-                custom: None,
-                keyboard: None,
-                auto_boost_above: None,
-                fan: FanSwitch::default(),
-                fan_sets: BTreeMap::new(),
-                keyboard_level: None,
-                touchpad_on: true,
-            });
+        Self::load_from(Path::new(Self::PATH))
+    }
+
+    pub fn load_from(path: &Path) -> Self {
+        Self::read(path).unwrap_or_else(|_| Self::empty())
+    }
+
+    fn empty() -> Self {
+        Self {
+            profiles: Vec::new(),
+            custom: None,
+            keyboard: None,
+            auto_boost_above: None,
+            fan: FanSwitch::default(),
+            fan_sets: BTreeMap::new(),
+            keyboard_level: None,
+            touchpad_on: true,
+        }
+    }
+
+    /// The file's config; a missing file is the defaults, an unreadable or damaged one is an error.
+    fn read(path: &Path) -> HwResult<Self> {
+        let mut cfg = match std::fs::read_to_string(path) {
+            Ok(t) => serde_json::from_str::<Self>(&t)
+                .map_err(|e| HwError::Other(format!("{} is damaged: {e}", path.display())))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::empty(),
+            Err(e) => return Err(e.into()),
+        };
         cfg.settle();
-        cfg
+        Ok(cfg)
     }
 
     /// Bring an old or damaged config in line: the single custom preset of older versions becomes the
@@ -400,14 +418,23 @@ impl Config {
         }
     }
 
-    pub fn save(&self) -> HwResult<()> {
-        let dir = std::path::Path::new(Self::PATH)
-            .parent()
-            .expect("PATH has a parent");
-        std::fs::create_dir_all(dir)?;
-        let text = serde_json::to_string_pretty(self).map_err(|e| HwError::Other(e.to_string()))?;
-        std::fs::write(Self::PATH, text)?;
-        Ok(())
+    /// Change the saved config: load it fresh, let `f` change what it owns, write it back, all under
+    /// one lock. Nothing is written when `f` fails, nor when the file is damaged (it is left for the
+    /// user to fix: saving defaults over it would lose every profile and curve).
+    pub fn update<R>(f: impl FnOnce(&mut Self) -> HwResult<R>) -> HwResult<R> {
+        Self::update_at(Path::new(Self::PATH), f)
+    }
+
+    pub fn update_at<R>(path: &Path, f: impl FnOnce(&mut Self) -> HwResult<R>) -> HwResult<R> {
+        store::locked(path, || {
+            Ok(Self::read(path).and_then(|mut cfg| {
+                let out = f(&mut cfg)?;
+                let text = serde_json::to_string_pretty(&cfg)
+                    .map_err(|e| HwError::Other(e.to_string()))?;
+                store::write_atomic(path, text.as_bytes())?;
+                Ok(out)
+            }))
+        })?
     }
 }
 
@@ -1086,9 +1113,10 @@ pub fn platform_toggles(u: &SysfsEc, has_lightbar: bool) -> Vec<(&'static str, b
 /// Switch the touchpad on or off, now, and remember it: the daemon keeps the touchpad the way the user chose
 /// (after a reboot the driver binds by itself, so an "off" has to be re-applied).
 pub fn set_touchpad(on: bool) -> HwResult<()> {
-    let mut cfg = Config::load();
-    cfg.touchpad_on = on;
-    cfg.save()?;
+    Config::update(|c| {
+        c.touchpad_on = on;
+        Ok(())
+    })?;
     crate::touchpad::set(on)
 }
 
@@ -2215,5 +2243,103 @@ mod tests {
         assert_eq!(cfg.profiles[0].base, OperatingMode::Turbo);
         // the old key is never written back
         assert!(!serde_json::to_string(&cfg).unwrap().contains("\"custom\""));
+    }
+
+    fn temp_config(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ripple-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d.join("config.json")
+    }
+
+    #[test]
+    fn a_profile_lives_through_new_edit_curve_and_delete() {
+        let path = temp_config("life");
+        let gaming = default_custom();
+        Config::update_at(&path, |c| {
+            let name = next_profile_name(&c.profiles);
+            c.profiles.push(CustomProfile {
+                name,
+                base: OperatingMode::Gaming,
+                preset: gaming,
+            });
+            Ok(())
+        })
+        .unwrap();
+        let mut cfg = Config::load_from(&path);
+        assert_eq!(cfg.profiles.len(), 1);
+        let p = Profile::Custom(0);
+        let mut set = cfg.fan_set(p);
+        set_curve_point(&mut set.cpu, 2, 70);
+        Config::update_at(&path, |c| {
+            c.set_fan_set(p, set);
+            Ok(())
+        })
+        .unwrap();
+        cfg = Config::load_from(&path);
+        assert_eq!(cfg.fan_set(p).cpu, set.cpu);
+        assert_eq!(cfg.fan_sets.len(), 1, "only a changed curve is stored");
+        Config::update_at(&path, |c| {
+            let gone = c.profiles.remove(0);
+            c.fan_sets.remove(&gone.name);
+            Ok(())
+        })
+        .unwrap();
+        cfg = Config::load_from(&path);
+        assert!(cfg.profiles.is_empty() && cfg.fan_sets.is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn editors_in_parallel_lose_no_update() {
+        let path = temp_config("race");
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..5 {
+                        Config::update_at(&path, |c| {
+                            let name = next_profile_name(&c.profiles);
+                            c.profiles.push(CustomProfile {
+                                name,
+                                base: OperatingMode::Gaming,
+                                preset: default_custom(),
+                            });
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(Config::load_from(&path).profiles.len(), 40);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_damaged_file_is_left_alone_and_a_failed_edit_writes_nothing() {
+        let path = temp_config("damaged");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ not json").unwrap();
+        let err = Config::update_at(&path, |c| {
+            c.touchpad_on = false;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("damaged"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+        // readers still get the defaults
+        assert!(Config::load_from(&path).touchpad_on);
+        // an edit that fails after changing something is not saved
+        std::fs::write(&path, "{}").unwrap();
+        let r: HwResult<()> = Config::update_at(&path, |c| {
+            c.touchpad_on = false;
+            Err("no".to_string().into())
+        });
+        assert!(r.is_err());
+        assert!(Config::load_from(&path).touchpad_on);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

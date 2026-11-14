@@ -146,7 +146,6 @@ pub struct Hw {
     ec_error: Option<String>,
     sysfs: Option<SysfsEc>,
     stock: [Preset; 3],
-    cfg: Config,
     model: String,
     /// Did the auto-boost policy (not the user) switch boost on?
     ours: bool,
@@ -183,7 +182,6 @@ impl Hw {
             ec_error,
             sysfs,
             stock,
-            cfg,
             model,
             ours: false,
             button: false,
@@ -200,9 +198,8 @@ impl Hw {
     }
 
     pub fn snapshot(&mut self) -> Snapshot {
-        // the CLI edits the profiles and the fan profile too: always start from what is saved
-        let saved = Config::load();
-        self.cfg.profiles = saved.profiles;
+        // the CLI and the tray edit the config too: always start from what is saved
+        let cfg = Config::load();
         let mut s = Snapshot {
             model: self.model.clone(),
             backend: self
@@ -211,17 +208,14 @@ impl Hw {
                 .map_or("none".into(), |e| e.name().to_string()),
             ec_error: self.ec_error.clone(),
             stock: self.stock,
-            customs: self.cfg.profiles.clone(),
-            auto_boost: self.cfg.auto_boost_above,
+            customs: cfg.profiles.clone(),
+            auto_boost: cfg.auto_boost_above,
             button: self.button,
             service: self.service,
             event: self.event.clone(),
             ..Default::default()
         };
-        let (stock, customs) = (self.stock, self.cfg.profiles.clone());
-        self.cfg.fan = saved.fan;
-        self.cfg.fan_sets = saved.fan_sets;
-        self.cfg.touchpad_on = saved.touchpad_on; // chosen elsewhere too (CLI, daemon): never write back a stale one
+        let (stock, customs) = (self.stock, cfg.profiles.clone());
         let mut manual = None; // what the fans are told to run at, while the EC follows the duty registers
         if let Some(ec) = self.ec.as_deref_mut() {
             s.profile = control::running(ec, &stock, &customs).ok().flatten();
@@ -231,7 +225,7 @@ impl Hw {
                 .zip(ec.read(addr::PL2_SETTING).ok());
             s.pl4 = ec.read(addr::PL4_SETTING).ok();
             let fan_byte = ec.read(addr::MAFAN_CONTROL_BYTE).ok();
-            s.boosted = fan_byte.is_some_and(control::is_boosted) && !self.cfg.fan.enabled;
+            s.boosted = fan_byte.is_some_and(control::is_boosted) && !cfg.fan.enabled;
             manual = fan_byte.and_then(|b| control::manual_duties(ec, b));
             s.has_lightbar = control::has_lightbar(ec);
             s.has_keyboard = control::has_keyboard_rgb(ec);
@@ -250,10 +244,10 @@ impl Hw {
         }
         // each profile has its own fan curves: those of the running one (Gaming's when it is not known)
         let shown = s.profile.unwrap_or(Profile::Stock(OperatingMode::Gaming));
-        s.fan = self.cfg.fan_curves(shown);
-        s.fan_default = self.cfg.fan_default(shown);
+        s.fan = cfg.fan_curves(shown);
+        s.fan_default = cfg.fan_default(shown);
         // The chosen colour/brightness while the EC still shows it; else whatever the EC shows now.
-        s.hsv = control::keyboard_choice(self.cfg.keyboard, s.keyboard).unwrap_or(s.hsv);
+        s.hsv = control::keyboard_choice(cfg.keyboard, s.keyboard).unwrap_or(s.hsv);
         if let Some(u) = &self.sysfs {
             s.ctgp = u
                 .get_attr("ctgp_offset")
@@ -310,14 +304,13 @@ impl Hw {
     }
 
     fn preset(&self, p: Profile) -> Preset {
-        control::preset_for(&self.stock, &self.cfg.profiles, p)
+        control::preset_for(&self.stock, &Config::load().profiles, p)
     }
 
     /// A profile's name as shown in messages.
     fn label(&self, p: Profile) -> String {
         match p {
-            Profile::Custom(i) => self
-                .cfg
+            Profile::Custom(i) => Config::load()
                 .profiles
                 .get(i)
                 .map_or_else(|| "custom".to_string(), |c| c.name.clone()),
@@ -335,7 +328,7 @@ impl Hw {
         self.sysfs = sysfs;
         r?;
         // limits alone cannot tell a profile from the stock one it was copied from
-        control::remember_profile(&self.cfg.profiles, p);
+        control::remember_profile(&Config::load().profiles, p);
         Ok(format!(
             "{}: PL1 {} W / PL2 {} W / PL4 {} W / GPU cTGP +{} W",
             self.label(p),
@@ -348,8 +341,7 @@ impl Hw {
 
     /// One press of the hardware mode button.
     pub fn cycle_profile(&mut self) -> String {
-        self.cfg.profiles = Config::load().profiles;
-        let (stock, customs) = (self.stock, self.cfg.profiles.clone());
+        let (stock, customs) = (self.stock, Config::load().profiles);
         let cur = match self.ec() {
             Ok(ec) => control::running(ec, &stock, &customs).ok().flatten(),
             Err(e) => return format!("mode button: {e}"),
@@ -362,8 +354,7 @@ impl Hw {
 
     /// The profiles as last saved (the CLI edits them too), and the one at `idx` in them.
     fn profile_at(&mut self, idx: usize) -> Result<CustomProfile, String> {
-        self.cfg.profiles = Config::load().profiles;
-        self.cfg
+        Config::load()
             .profiles
             .get(idx)
             .cloned()
@@ -408,19 +399,25 @@ impl Hw {
             return Ok("profile unchanged".into());
         }
         let was_running = self.is_running(Profile::Custom(idx));
-        self.cfg.profiles[idx].preset = p;
-        self.cfg.save().map_err(|e| e.to_string())?;
+        let name = Config::update(|c| {
+            let slot = c
+                .profiles
+                .get_mut(idx)
+                .ok_or_else(|| "that profile is gone".to_string())?;
+            slot.preset = p;
+            Ok(slot.name.clone())
+        })?;
         if was_running {
             return self.set_profile(Profile::Custom(idx));
         }
         Ok(format!(
-            "{}: PL1 {} W / PL2 {} W / PL4 {} W / cTGP +{} W",
-            self.cfg.profiles[idx].name, p.pl1, p.pl2, p.pl4, p.ctgp
+            "{name}: PL1 {} W / PL2 {} W / PL4 {} W / cTGP +{} W",
+            p.pl1, p.pl2, p.pl4, p.ctgp
         ))
     }
 
     fn is_running(&mut self, p: Profile) -> bool {
-        let (stock, customs) = (self.stock, self.cfg.profiles.clone());
+        let (stock, customs) = (self.stock, Config::load().profiles);
         self.ec()
             .ok()
             .and_then(|ec| control::running(ec, &stock, &customs).ok().flatten())
@@ -430,8 +427,7 @@ impl Hw {
     /// Make "Profile N" as a copy of what is running now (the stock mode it started from is its base)
     /// and switch to it, so it is the one you edit.
     pub fn new_profile(&mut self) -> Result<String, String> {
-        self.cfg.profiles = Config::load().profiles;
-        let (stock, customs) = (self.stock, self.cfg.profiles.clone());
+        let (stock, customs) = (self.stock, Config::load().profiles);
         let gaming = (OperatingMode::Gaming, stock[OperatingMode::Gaming as usize]);
         let running = self
             .ec()
@@ -442,37 +438,38 @@ impl Hw {
             Some(Profile::Custom(i)) => customs.get(i).map_or(gaming, |c| (c.base, c.preset)),
             None => gaming,
         };
-        let name = control::next_profile_name(&customs);
-        self.cfg.profiles.push(CustomProfile { name, base, preset });
-        self.cfg.save().map_err(|e| e.to_string())?;
-        self.set_profile(Profile::Custom(self.cfg.profiles.len() - 1))
+        let idx = Config::update(|c| {
+            let name = control::next_profile_name(&c.profiles);
+            c.profiles.push(CustomProfile { name, base, preset });
+            Ok(c.profiles.len() - 1)
+        })?;
+        self.set_profile(Profile::Custom(idx))
     }
 
     /// Delete a profile; if it was running, go back to the stock mode it started from.
     pub fn delete_profile(&mut self, idx: usize) -> Result<String, String> {
-        let gone = self.profile_at(idx)?;
         let was_running = self.is_running(Profile::Custom(idx));
-        self.cfg.profiles.remove(idx);
-        self.cfg.fan_sets.remove(&gone.name);
-        self.cfg.save().map_err(|e| e.to_string())?;
+        let gone = Config::update(|c| {
+            if idx >= c.profiles.len() {
+                return Err("that profile is gone".to_string().into());
+            }
+            let gone = c.profiles.remove(idx);
+            c.fan_sets.remove(&gone.name);
+            Ok(gone)
+        })?;
         if was_running {
             self.set_profile(Profile::Stock(gone.base))?;
-        } else {
-            // indexes after it moved up by one: the remembered one has to follow
-            let customs = self.cfg.profiles.clone();
-            if let Some(i) = control::remembered_profile(&customs) {
-                control::remember_profile(&customs, Profile::Custom(i));
-            }
         }
         Ok(format!("deleted {}", gone.name))
     }
 
     /// Auto (firmware), the custom fan profile (the daemon applies it) or boost.
     pub fn set_fan_mode(&mut self, mode: FanMode) -> Result<String, String> {
-        self.cfg.fan = Config::load().fan;
-        let was_custom = self.cfg.fan.enabled;
-        self.cfg.fan.enabled = mode == FanMode::Custom;
-        self.cfg.save().map_err(|e| e.to_string())?;
+        let was_custom = Config::update(|c| {
+            let was = c.fan.enabled;
+            c.fan.enabled = mode == FanMode::Custom;
+            Ok(was)
+        })?;
         self.ours = false; // a manual choice always wins over the auto-boost policy
         let ec = self.ec()?;
         if was_custom && mode != FanMode::Custom {
@@ -502,14 +499,6 @@ impl Hw {
         })
     }
 
-    /// Reload what the CLI may have changed since: the profiles and the fan curves.
-    fn reload_fan(&mut self) {
-        let saved = Config::load();
-        self.cfg.profiles = saved.profiles;
-        self.cfg.fan = saved.fan;
-        self.cfg.fan_sets = saved.fan_sets;
-    }
-
     /// Set one point of a profile's curve (fan 0 = CPU, 1 = GPU); the curve never falls, so the points
     /// around it move with it.
     pub fn set_fan_point(
@@ -519,13 +508,14 @@ impl Hw {
         idx: usize,
         duty: u8,
     ) -> Result<String, String> {
-        self.reload_fan();
-        let mut set = self.cfg.fan_set(profile);
-        let c = if fan == 0 { &mut set.cpu } else { &mut set.gpu };
-        control::set_curve_point(c, idx, duty);
-        set.validate()?;
-        self.cfg.set_fan_set(profile, set);
-        self.cfg.save().map_err(|e| e.to_string())?;
+        Config::update(|cfg| {
+            let mut set = cfg.fan_set(profile);
+            let c = if fan == 0 { &mut set.cpu } else { &mut set.gpu };
+            control::set_curve_point(c, idx, duty);
+            set.validate()?;
+            cfg.set_fan_set(profile, set);
+            Ok(())
+        })?;
         Ok(format!(
             "{} fan ({}): {duty} % at {} °C",
             if fan == 0 { "CPU" } else { "GPU" },
@@ -536,10 +526,11 @@ impl Hw {
 
     /// Back to the default curves of the profile (on/off is kept).
     pub fn reset_fan_curves(&mut self, profile: Profile) -> Result<String, String> {
-        self.reload_fan();
-        let default = self.cfg.fan_default(profile);
-        self.cfg.set_fan_set(profile, default);
-        self.cfg.save().map_err(|e| e.to_string())?;
+        Config::update(|cfg| {
+            let default = cfg.fan_default(profile);
+            cfg.set_fan_set(profile, default);
+            Ok(())
+        })?;
         Ok(format!(
             "fan curves ({}): default preset",
             self.label(profile)
@@ -547,8 +538,10 @@ impl Hw {
     }
 
     pub fn set_auto_boost(&mut self, t: Option<u8>) -> Result<String, String> {
-        self.cfg.auto_boost_above = t;
-        self.cfg.save().map_err(|e| e.to_string())?;
+        Config::update(|c| {
+            c.auto_boost_above = t;
+            Ok(())
+        })?;
         Ok(match t {
             Some(t) => format!("auto-boost fans above {t} °C"),
             None => "auto-boost off".into(),
@@ -558,7 +551,7 @@ impl Hw {
     /// The colour/brightness in effect: the last choice made here while the EC still shows it, else
     /// what the EC shows.
     pub fn hsv(&mut self) -> Hsv {
-        let saved = self.cfg.keyboard;
+        let saved = Config::load().keyboard;
         let levels = self.ec().ok().and_then(|ec| control::keyboard_rgb(ec).ok());
         control::keyboard_choice(saved, levels).unwrap_or(Hsv {
             h: 180,
@@ -568,7 +561,7 @@ impl Hw {
     }
 
     pub fn set_rainbow(&mut self, on: bool) -> Result<String, String> {
-        let was = self.cfg.keyboard_level;
+        let was = Config::load().keyboard_level;
         let ec = self.ec()?;
         control::keyboard_on(ec, was).map_err(|e| e.to_string())?;
         control::set_keyboard_rainbow(ec, on).map_err(|e| e.to_string())?;
@@ -585,20 +578,24 @@ impl Hw {
         let ec = self.ec()?;
         let level = control::keyboard_off(ec).map_err(|e| e.to_string())?;
         if level > 0 {
-            self.cfg.keyboard_level = Some(level);
-            self.cfg.save().map_err(|e| e.to_string())?;
+            Config::update(|c| {
+                c.keyboard_level = Some(level);
+                Ok(())
+            })?;
         }
         Ok("keyboard: off".into())
     }
 
     /// Set the keyboard colour and brightness, and remember the exact choice.
     pub fn set_keyboard(&mut self, hsv: Hsv) -> Result<String, String> {
-        let was = self.cfg.keyboard_level;
+        let was = Config::load().keyboard_level;
         let ec = self.ec()?;
         control::keyboard_on(ec, was).map_err(|e| e.to_string())?; // picking a colour lights it again
         control::set_keyboard_hsv(ec, hsv).map_err(|e| e.to_string())?;
-        self.cfg.keyboard = Some(hsv);
-        self.cfg.save().map_err(|e| e.to_string())?;
+        Config::update(|c| {
+            c.keyboard = Some(hsv);
+            Ok(())
+        })?;
         let l = hsv.to_levels();
         Ok(format!(
             "keyboard: hue {} sat {} % brightness {} % (levels {},{},{})",

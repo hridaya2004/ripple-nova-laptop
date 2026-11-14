@@ -14,6 +14,8 @@ mod mock;
 #[cfg(target_os = "linux")]
 pub mod notify;
 #[cfg(target_os = "linux")]
+pub mod store;
+#[cfg(target_os = "linux")]
 pub mod touchpad;
 
 use std::time::Duration;
@@ -38,6 +40,13 @@ pub enum HwError {
 }
 
 pub type HwResult<T> = Result<T, HwError>;
+
+/// A plain message is an `Other` error, so a `String` error can `?` into a `HwResult`.
+impl From<String> for HwError {
+    fn from(msg: String) -> Self {
+        Self::Other(msg)
+    }
+}
 
 /// Convenience: convert into `String` so CLI code can use `?` directly.
 impl From<HwError> for String {

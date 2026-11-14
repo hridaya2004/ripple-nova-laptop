@@ -2309,8 +2309,12 @@ impl Ui {
             "Notify when the performance profile, fan boost or a toggle changes. The tray menu switches this too.",
             self.settings.popups,
             |ui, cx| {
-                ui.settings.popups = !ui.settings.popups;
-                ui.save_settings(cx);
+                let on = !ui.settings.popups;
+                match ripple_hw::notify::set_popups(on) {
+                    Ok(()) => ui.settings.popups = on,
+                    Err(e) => ui.say(format!("error: could not save the popup setting: {e}"), cx),
+                }
+                cx.notify();
             },
         ));
         let startup = section(p, "Startup")

@@ -5,7 +5,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-const PATH: &str = "/etc/ripple-nova/gui.json";
+use ripple_hw::notify::GUI_SETTINGS as PATH;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -47,11 +47,17 @@ impl Settings {
             .unwrap_or_default()
     }
 
+    /// Save the window's own preferences. The popups key is not ours: the tray switches it too (as
+    /// root, through `rcc popups`), so it is left as it is in the file, and the keys are set under the
+    /// same lock the tray's write takes.
     pub fn save(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all("/etc/ripple-nova")?;
-        std::fs::write(
-            PATH,
-            serde_json::to_string_pretty(self).map_err(std::io::Error::other)?,
+        ripple_hw::store::set_json_keys(
+            std::path::Path::new(PATH),
+            &[
+                ("light", self.light.into()),
+                ("font", self.font.clone().into()),
+                ("start_minimized", self.start_minimized.into()),
+            ],
         )
     }
 }

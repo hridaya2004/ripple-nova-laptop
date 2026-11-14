@@ -696,7 +696,7 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
     use clap::ValueEnum;
     let mut ec = open_ec(cli)?;
     let stock = control::stock(Some(ec.as_mut()));
-    let mut cfg = Config::load();
+    let cfg = Config::load();
     match cmd {
         ModeCmd::Get => {
             let (pl1, pl2, pl4) = (
@@ -765,15 +765,17 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
                 ctgp: *ctgp,
             };
             pr.validate()?;
-            match find_profile(&cfg, name) {
-                Ok(i) => cfg.profiles[i].preset = pr,
-                Err(_) => cfg.profiles.push(control::CustomProfile {
-                    name: name.to_string(),
-                    base: operating_mode(*base),
-                    preset: pr,
-                }),
-            }
-            cfg.save()?;
+            Config::update(|cfg| {
+                match find_profile(cfg, name) {
+                    Ok(i) => cfg.profiles[i].preset = pr,
+                    Err(_) => cfg.profiles.push(control::CustomProfile {
+                        name: name.to_string(),
+                        base: operating_mode(*base),
+                        preset: pr,
+                    }),
+                }
+                Ok(())
+            })?;
             println!(
                 "profile '{name}' saved: {} (apply with `rcc mode set \"{name}\"`)",
                 limits(&pr)
@@ -781,24 +783,26 @@ fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
             Ok(())
         }
         ModeCmd::ResetCustom { name } => {
-            let i = find_profile(&cfg, name)?;
-            let base = cfg.profiles[i].base;
-            cfg.profiles[i].preset = stock[base as usize];
-            cfg.save()?;
+            let (name, base) = Config::update(|cfg| {
+                let i = find_profile(cfg, name)?;
+                let base = cfg.profiles[i].base;
+                cfg.profiles[i].preset = stock[base as usize];
+                Ok((cfg.profiles[i].name.clone(), base))
+            })?;
             println!(
-                "profile '{}' back to {}: {} (apply with `rcc mode set \"{}\"`)",
-                cfg.profiles[i].name,
+                "profile '{name}' back to {}: {} (apply with `rcc mode set \"{name}\"`)",
                 base.as_str(),
-                limits(&cfg.profiles[i].preset),
-                cfg.profiles[i].name
+                limits(&stock[base as usize]),
             );
             Ok(())
         }
         ModeCmd::Delete { name } => {
-            let i = find_profile(&cfg, name)?;
-            let gone = cfg.profiles.remove(i);
-            cfg.fan_sets.remove(&gone.name);
-            cfg.save()?;
+            let gone = Config::update(|cfg| {
+                let i = find_profile(cfg, name)?;
+                let gone = cfg.profiles.remove(i);
+                cfg.fan_sets.remove(&gone.name);
+                Ok(gone)
+            })?;
             println!("profile '{}' deleted", gone.name);
             Ok(())
         }
@@ -974,7 +978,7 @@ fn popups(state: Option<crate::OnOff>) -> CmdResult {
 }
 
 fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
-    let mut cfg = Config::load();
+    let cfg = Config::load();
     match cmd {
         CustomFanCmd::Show { profile } => {
             let p = fan_profile(cli, &cfg, profile)?;
@@ -1003,8 +1007,10 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
             );
         }
         CustomFanCmd::On => {
-            cfg.fan.enabled = true;
-            cfg.save()?;
+            Config::update(|c| {
+                c.fan.enabled = true;
+                Ok(())
+            })?;
             // the engine leaves a boost alone, so end it first or the profile would never take over
             if let Ok(mut ec) = open_ec(cli) {
                 if ec
@@ -1019,8 +1025,10 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
             );
         }
         CustomFanCmd::Off => {
-            cfg.fan.enabled = false;
-            cfg.save()?;
+            Config::update(|c| {
+                c.fan.enabled = false;
+                Ok(())
+            })?;
             control::fan_release(open_ec(cli)?.as_mut())?;
             println!("custom fan profile off, fans handed back to the firmware");
         }
@@ -1029,32 +1037,32 @@ fn fan_custom(cli: &Cli, cmd: &CustomFanCmd) -> CmdResult {
                 <[u8; 5]>::try_from(v.as_slice())
                     .map_err(|_| "need exactly five values".to_string())
             };
-            let p = fan_profile(cli, &cfg, profile)?;
-            let mut set = cfg.fan_set(p);
-            if let Some(v) = cpu {
-                set.cpu = arr(v)?;
-            }
-            if let Some(v) = gpu {
-                set.gpu = arr(v)?;
-            }
-            set.validate()?;
-            cfg.set_fan_set(p, set);
-            cfg.save()?;
+            let label = Config::update(|cfg| {
+                let p = fan_profile(cli, cfg, profile)?;
+                let mut set = cfg.fan_set(p);
+                if let Some(v) = cpu {
+                    set.cpu = arr(v)?;
+                }
+                if let Some(v) = gpu {
+                    set.gpu = arr(v)?;
+                }
+                set.validate()?;
+                cfg.set_fan_set(p, set);
+                Ok(profile_label(cfg, p))
+            })?;
             println!(
-                "curves of {} saved (on at {:?} °C)",
-                profile_label(&cfg, p),
+                "curves of {label} saved (on at {:?} °C)",
                 control::FAN_ANCHORS
             );
         }
         CustomFanCmd::Reset { profile } => {
-            let p = fan_profile(cli, &cfg, profile)?;
-            let default = cfg.fan_default(p);
-            cfg.set_fan_set(p, default);
-            cfg.save()?;
-            println!(
-                "curves of {} back to the default preset",
-                profile_label(&cfg, p)
-            );
+            let label = Config::update(|cfg| {
+                let p = fan_profile(cli, cfg, profile)?;
+                let default = cfg.fan_default(p);
+                cfg.set_fan_set(p, default);
+                Ok(profile_label(cfg, p))
+            })?;
+            println!("curves of {label} back to the default preset");
         }
         CustomFanCmd::Run { seconds } => {
             static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1122,14 +1130,15 @@ fn power(cli: &Cli, cmd: &PowerCmd) -> CmdResult {
 
 /// Backlight on (back to the level it had) or off (the level is remembered).
 fn keyboard_backlight(ec: &mut dyn EcAccess, on: bool) -> CmdResult {
-    let mut cfg = Config::load();
     if on {
-        control::keyboard_on(ec, cfg.keyboard_level)?;
+        control::keyboard_on(ec, Config::load().keyboard_level)?;
     } else {
         let level = control::keyboard_off(ec)?;
         if level > 0 {
-            cfg.keyboard_level = Some(level);
-            cfg.save()?;
+            Config::update(|c| {
+                c.keyboard_level = Some(level);
+                Ok(())
+            })?;
         }
     }
     println!("keyboard backlight {}", if on { "on" } else { "off" });
@@ -1291,9 +1300,10 @@ fn rgb(cli: &Cli, cmd: &RgbCmd) -> CmdResult {
 /// Apply a keyboard colour and remember it (the EC cannot hold hue and brightness separately).
 fn set_keyboard(ec: &mut dyn EcAccess, hsv: Hsv) -> CmdResult {
     control::set_keyboard_hsv(ec, hsv)?;
-    let mut cfg = Config::load();
-    cfg.keyboard = Some(hsv);
-    cfg.save()?;
+    Config::update(|c| {
+        c.keyboard = Some(hsv);
+        Ok(())
+    })?;
     let l = hsv.to_levels();
     println!(
         "keyboard colour → hue {} sat {} % brightness {} % (EC levels {},{},{} of {})",
