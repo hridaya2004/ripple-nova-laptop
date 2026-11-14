@@ -225,7 +225,9 @@ impl Notifier {
 
         if let Some(now) = s.profile {
             // switching *to* Custom is the user's own preset at work: no popup (leaving it for a stock one is)
-            if !first && now != Profile::Custom && self.profile.is_some_and(|before| before != now)
+            if !first
+                && !matches!(now, Profile::Custom(_))
+                && self.profile.is_some_and(|before| before != now)
             {
                 let limits =
                     s.pl.map(|(a, b)| format!(": PL1 {a} W / PL2 {b} W"))
@@ -357,7 +359,7 @@ mod tests {
             n.observe(&seen(b, false, &[("fn_lock", false)])),
             [(
                 "Performance profile".to_string(),
-                "Enthusiast: PL1 55 W / PL2 55 W".to_string()
+                "Gaming: PL1 55 W / PL2 55 W".to_string()
             )]
         );
         // a failed read in between hides nothing: Gaming -> (unknown) -> Office is still Gaming -> Office
@@ -378,7 +380,7 @@ mod tests {
             ]
         );
         // nothing "custom" pops up: switching to the Custom performance profile does not, leaving it for a stock one does
-        let custom = Some(Profile::Custom);
+        let custom = Some(Profile::Custom(0));
         assert!(n
             .observe(&seen(custom, false, &[("fn_lock", true)]))
             .is_empty());

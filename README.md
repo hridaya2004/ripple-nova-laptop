@@ -41,9 +41,10 @@ on a real laptop.
 
 **Works** (verified on the machine above):
 
-- **Performance profiles**: Balanced / Enthusiast / Overboost (the Windows app's names; 0 / 1 / 2 lights on the
-  mode button) = PL1/PL2 through the EC, GPU cTGP through the kernel driver, plus one editable *Custom performance
-  profile preset* with a "default preset" reset. The hardware button is followed, the lights follow the profile, and
+- **Performance profiles**: Office / Gaming / Turbo (the OEM's own mode names; the Windows app labels them Balanced / Enthusiast / Overboost; 0 / 1 / 2 lights on the
+  mode button) = PL1/PL2/PL4 through the EC (the stock three are the EC's own default slots: 35/35/145, 55/55/145, 65/65/145 W), GPU cTGP through the kernel driver, plus your own named profiles
+  (*Profile 1*, *Profile 2*, …: each starts as a copy of the profile running when you make it, has its own
+  PL1/PL2/PL4/cTGP, and can be reset to the stock mode it came from or deleted). The hardware button is followed, the lights follow the profile, and
   the profile the EC is running is recognised at boot.
 - **Fans**: Auto (firmware), Boost, and a **Custom fan profile**: two curves (fan 1 = CPU fan, fan 2 = GPU fan), five
   points each at 45/55/65/75/85 °C (dragged on a chart in the window), independent of the profile, switchable off any time, with a default preset and
@@ -178,7 +179,7 @@ start the window as root without a password**. It grants exactly:
 
 - `/usr/local/bin/rcc-gui` with no arguments, and the root-owned copy of it that *Open at login* installs
   (`/usr/local/lib/ripple-nova/rcc-gui`, also with no arguments),
-- `rcc touchpad on`, `off` and `toggle`, `rcc mode set balanced`, `enthusiast` and `overboost` (the tray icon's
+- `rcc touchpad on`, `off` and `toggle`, `rcc mode set office`, `gaming` and `turbo` (the tray icon's
   profile shortcut), and `rcc popups on` and `off` (its popups switch): these exact commands, no other arguments,
   no `custom`,
 - with the four display variables (`WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XAUTHORITY`) kept for the window
@@ -209,8 +210,8 @@ Use the daemon's engine only: never run `rcc fan custom run` next to the service
 ```sh
 sudo rcc doctor                      # what works on this machine, and how to fix what does not
 sudo rcc status                      # profile, limits, temperatures, fans, battery
-sudo rcc mode get | set balanced|enthusiast|overboost|custom | next
-sudo rcc mode custom 45 50 --ctgp 5  # your Custom performance profile preset; reset-custom to go back
+sudo rcc mode get | set office|gaming|turbo|"<profile name>" | next | list
+sudo rcc mode custom "Profile 1" 45 50 --pl4 120 --ctgp 5  # make or change one of your profiles; reset-custom <name> / delete <name>
 sudo rcc fan boost on|off            # refused while the custom fan profile is on
 sudo rcc fan custom show|on|off|set --cpu 20,30,45,70,100 --gpu 0,25,40,65,100|reset
 sudo rcc rgb color ff8800 | rainbow on|off | backlight on|off | brightness 60
@@ -225,7 +226,7 @@ sudo rcc battery get | profile performance|balanced|healthy
 - This writes EC registers and drives fans by hand. The failsafes above exist, but a wrong register can cost you
   a reboot; the EC rewrites some of what we write, and the register map came from reverse engineering.
 - Raw EC writes (`rcc ec write`) are refused outside the known register map unless you add `--force`.
-- Overboost applies 80 W PL1/PL2 and +20 W GPU cTGP (the OEM app's own values for this machine) and runs hot.
+- Turbo applies 65 W PL1/PL2 and 145 W PL4 (the EC's own default for that mode, what the Windows app calls Overboost) and runs hot.
 - The register map in `crates/ripple-core/src/regs.rs` was extracted from the OEM service. The OEM packages
   themselves are proprietary and are not part of this repository (`ControlCenter_*` is git-ignored).
 - Not affiliated with XMG, Uniwill or Tongfang.

@@ -436,8 +436,9 @@ fn status(cli: &Cli) -> CmdResult {
 
     println!("mode:");
     let stock = control::stock(Some(ec.as_mut()));
-    match control::current(ec.as_mut(), &stock, &Config::load().custom) {
-        Ok(Some(p)) => println!("  profile         : {}", p.name().to_lowercase()),
+    let cfg = Config::load();
+    match control::running(ec.as_mut(), &stock, &cfg.profiles) {
+        Ok(Some(p)) => println!("  profile         : {}", profile_label(&cfg, p)),
         Ok(None) => println!("  profile         : unknown (matches no profile)"),
         Err(e) => println!("  profile         : unreadable ({e})"),
     }
@@ -602,11 +603,32 @@ fn monitor(cli: &Cli, interval: f64) -> CmdResult {
     }
 }
 
-fn preset_of(stock: &[Preset; 3], cfg: &Config, p: Profile) -> Preset {
+/// A profile's name as shown: the stock modes in lowercase, one of the user's by its own name.
+fn profile_label(cfg: &Config, p: Profile) -> String {
     match p {
-        Profile::Stock(m) => stock[m as usize],
-        Profile::Custom => cfg.custom,
+        Profile::Custom(i) => cfg
+            .profiles
+            .get(i)
+            .map_or_else(|| "custom".to_string(), |c| c.name.clone()),
+        _ => p.name().to_lowercase(),
     }
+}
+
+fn find_profile(cfg: &Config, name: &str) -> Result<usize, String> {
+    cfg.profiles
+        .iter()
+        .position(|p| p.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            let names: Vec<_> = cfg.profiles.iter().map(|p| p.name.as_str()).collect();
+            format!(
+                "no profile named '{name}' (yours: {})",
+                if names.is_empty() {
+                    "none".into()
+                } else {
+                    names.join(", ")
+                }
+            )
+        })
 }
 
 /// Apply a profile; prints what was written.
@@ -617,15 +639,17 @@ fn apply_profile(
     cfg: &Config,
     p: Profile,
 ) -> CmdResult {
-    let pr = preset_of(stock, cfg, p);
+    let pr = control::preset_for(stock, &cfg.profiles, p);
     let sysfs = uniwill(cli).ok();
     control::apply(ec, sysfs.as_ref(), pr)?;
     control::set_mode_byte(ec, p)?; // the button's mode lights (0/1/2) + the EC's fan profile
+    control::remember_profile(&cfg.profiles, p); // which of two with the same limits is running
     println!(
-        "mode → {} (PL1 {} W, PL2 {} W, GPU cTGP +{} W)",
-        p.name().to_lowercase(),
+        "mode → {} (PL1 {} W, PL2 {} W, PL4 {} W, GPU cTGP +{} W)",
+        profile_label(cfg, p),
         pr.pl1,
         pr.pl2,
+        pr.pl4,
         pr.ctgp
     );
     if sysfs.is_none() && pr.ctgp > 0 {
@@ -634,52 +658,128 @@ fn apply_profile(
     Ok(())
 }
 
+fn operating_mode(m: ModeChoice) -> OperatingMode {
+    match m {
+        ModeChoice::Office => OperatingMode::Office,
+        ModeChoice::Gaming => OperatingMode::Gaming,
+        ModeChoice::Turbo => OperatingMode::Turbo,
+    }
+}
+
+fn limits(pr: &Preset) -> String {
+    format!(
+        "PL1 {} W, PL2 {} W, PL4 {} W, cTGP +{} W",
+        pr.pl1, pr.pl2, pr.pl4, pr.ctgp
+    )
+}
+
 fn mode(cli: &Cli, cmd: &ModeCmd) -> CmdResult {
+    use clap::ValueEnum;
     let mut ec = open_ec(cli)?;
     let stock = control::stock(Some(ec.as_mut()));
     let mut cfg = Config::load();
     match cmd {
         ModeCmd::Get => {
-            let (pl1, pl2) = (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?);
-            match control::current(ec.as_mut(), &stock, &cfg.custom)? {
+            let (pl1, pl2, pl4) = (
+                ec.read(addr::PL1_SETTING)?,
+                ec.read(addr::PL2_SETTING)?,
+                ec.read(addr::PL4_SETTING)?,
+            );
+            match control::running(ec.as_mut(), &stock, &cfg.profiles)? {
                 Some(p) => println!(
-                    "mode: {} (PL1 {pl1} W, PL2 {pl2} W)",
-                    p.name().to_lowercase()
+                    "mode: {} (PL1 {pl1} W, PL2 {pl2} W, PL4 {pl4} W)",
+                    profile_label(&cfg, p)
                 ),
                 None => println!("mode: unknown (PL1 {pl1} W, PL2 {pl2} W matches no profile)"),
             }
             Ok(())
         }
         ModeCmd::Set { mode } => {
-            let p = match mode {
-                ModeChoice::Balanced => Profile::Stock(OperatingMode::Office),
-                ModeChoice::Enthusiast => Profile::Stock(OperatingMode::Gaming),
-                ModeChoice::Overboost => Profile::Stock(OperatingMode::Turbo),
-                ModeChoice::Custom => Profile::Custom,
+            // a stock name (or its Windows-app alias) first, else one of the user's profiles
+            let p = match ModeChoice::from_str(mode, true) {
+                Ok(m) => Profile::Stock(operating_mode(m)),
+                Err(_) => Profile::Custom(find_profile(&cfg, mode)?),
             };
             apply_profile(ec.as_mut(), cli, &stock, &cfg, p)
         }
         ModeCmd::Next => {
-            let cur = control::current(ec.as_mut(), &stock, &cfg.custom)?;
+            let cur = control::running(ec.as_mut(), &stock, &cfg.profiles)?;
             apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur))
         }
-        ModeCmd::Custom { pl1, pl2, ctgp } => {
+        ModeCmd::List => {
+            println!("stock (read-only):");
+            for (m, pr) in control::STOCK_MODES.into_iter().zip(&stock) {
+                println!("  {:<10} {}", m.as_str(), limits(pr));
+            }
+            println!("yours:");
+            if cfg.profiles.is_empty() {
+                println!("  none (make one with `rcc mode custom <name> <pl1> <pl2>`)");
+            }
+            for c in &cfg.profiles {
+                println!(
+                    "  {:<10} {} (from {})",
+                    c.name,
+                    limits(&c.preset),
+                    c.base.as_str()
+                );
+            }
+            Ok(())
+        }
+        ModeCmd::Custom {
+            name,
+            pl1,
+            pl2,
+            pl4,
+            ctgp,
+            base,
+        } => {
+            let name = name.trim();
+            if name.is_empty() || ModeChoice::from_str(name, true).is_ok() {
+                return Err(format!(
+                    "'{name}' cannot be a profile name (empty, or a stock mode)"
+                ));
+            }
             let pr = Preset {
                 pl1: *pl1,
                 pl2: *pl2,
+                pl4: *pl4,
                 ctgp: *ctgp,
             };
             pr.validate()?;
-            cfg.custom = pr;
+            match find_profile(&cfg, name) {
+                Ok(i) => cfg.profiles[i].preset = pr,
+                Err(_) => cfg.profiles.push(control::CustomProfile {
+                    name: name.to_string(),
+                    base: operating_mode(*base),
+                    preset: pr,
+                }),
+            }
             cfg.save()?;
-            println!("custom preset saved: PL1 {pl1} W, PL2 {pl2} W, cTGP +{ctgp} W (apply with `rcc mode set custom`)");
+            println!(
+                "profile '{name}' saved: {} (apply with `rcc mode set \"{name}\"`)",
+                limits(&pr)
+            );
             Ok(())
         }
-        ModeCmd::ResetCustom => {
-            cfg.custom = control::default_custom();
+        ModeCmd::ResetCustom { name } => {
+            let i = find_profile(&cfg, name)?;
+            let base = cfg.profiles[i].base;
+            cfg.profiles[i].preset = stock[base as usize];
             cfg.save()?;
-            let c = cfg.custom;
-            println!("custom preset back to the default: PL1 {} W, PL2 {} W, cTGP +{} W (apply with `rcc mode set custom`)", c.pl1, c.pl2, c.ctgp);
+            println!(
+                "profile '{}' back to {}: {} (apply with `rcc mode set \"{}\"`)",
+                cfg.profiles[i].name,
+                base.as_str(),
+                limits(&cfg.profiles[i].preset),
+                cfg.profiles[i].name
+            );
+            Ok(())
+        }
+        ModeCmd::Delete { name } => {
+            let i = find_profile(&cfg, name)?;
+            let gone = cfg.profiles.remove(i);
+            cfg.save()?;
+            println!("profile '{}' deleted", gone.name);
             Ok(())
         }
     }
@@ -693,8 +793,13 @@ fn watch(cli: &Cli) -> CmdResult {
     // First find out which profile the EC is running (right after boot its limits are unset, only
     // the lights know), write its limits and put the lights on it: this has to come before the fan
     // engine can set its manual bit, which hides the mode from `current`.
-    match control::adopt(ec.as_mut(), uniwill(cli).ok().as_ref(), &stock, &cfg.custom)? {
-        Some(p) => println!("profile: {}", p.name()),
+    match control::adopt(
+        ec.as_mut(),
+        uniwill(cli).ok().as_ref(),
+        &stock,
+        &cfg.profiles,
+    )? {
+        Some(p) => println!("profile: {}", profile_label(&cfg, p)),
         None => println!("profile: unknown (limits and lights match no profile)"),
     }
     // The custom fan profile (when switched on) runs inside this daemon, independent of the button
@@ -716,7 +821,9 @@ fn watch(cli: &Cli) -> CmdResult {
     println!("watching the mode button (Ctrl+C to stop)");
     loop {
         control::wait_mode_key(&mut key)?;
-        let cur = control::current(ec.as_mut(), &stock, &cfg.custom)?;
+        // read again: profiles made in the window or with `rcc mode custom` since the last press count
+        let cfg = Config::load();
+        let cur = control::running(ec.as_mut(), &stock, &cfg.profiles)?;
         if let Err(e) = apply_profile(ec.as_mut(), cli, &stock, &cfg, Profile::after_button(cur)) {
             eprintln!("error: {e}"); // keep watching, a failed press must not kill the daemon
         }
@@ -951,7 +1058,13 @@ fn power(cli: &Cli, cmd: &PowerCmd) -> CmdResult {
             };
             let other = ec.read(other)?;
             let (pl1, pl2) = if is_pl1 { (w, other) } else { (other, w) };
-            Preset { pl1, pl2, ctgp: 0 }.validate()?; // 5..=ceiling, PL1 <= PL2
+            Preset {
+                pl1,
+                pl2,
+                pl4: control::PL4_CEILING_W,
+                ctgp: 0,
+            }
+            .validate()?; // 5..=ceiling, PL1 <= PL2
             ec.write_verified(reg, w)?;
             println!(
                 "PL{} → {w} W (readback {} W)",

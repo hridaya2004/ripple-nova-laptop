@@ -2,7 +2,7 @@
 //! StatusNotifierItem on the user's session bus. A click (or "Open") runs the launcher, which opens the
 //! window (or brings the open one forward); "Quit" closes the window and the icon.
 //!
-//! The menu also holds a shortcut for the performance profile (Balanced / Enthusiast / Overboost). The
+//! The menu also holds a shortcut for the performance profile (Office / Gaming / Turbo). The
 //! current one is read from the file the daemon publishes (this process cannot read the EC); picking one
 //! runs `rcc mode set <name>` as root, through the exact sudoers entries install.sh writes (polkit asks
 //! when there are none). "Enable / Disable notifications" works the same way (`rcc popups on|off`); the
@@ -21,9 +21,9 @@ use ripple_hw::notify::popups_enabled;
 
 /// `(name for rcc, label)`. The sudoers rule lists `rcc mode set <name>` for exactly these three.
 const PROFILES: [(&str, &str); 3] = [
-    ("balanced", "Balanced"),
-    ("enthusiast", "Enthusiast"),
-    ("overboost", "Overboost"),
+    ("office", "Office"),
+    ("gaming", "Gaming"),
+    ("turbo", "Turbo"),
 ];
 
 /// Written by the daemon once a second (`ripple_hw::control::PROFILE_FILE`): the profile it sees, lowercase.

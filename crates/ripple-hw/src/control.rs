@@ -1,4 +1,4 @@
-//! Profile (Balanced/Enthusiast/Overboost), fan boost and mode-button handling shared by
+//! Profile (Office/Gaming/Turbo), fan boost and mode-button handling shared by
 //! `rcc` and `rcc-gui`. Everything here was verified on real hardware:
 //! PL1/PL2 via EC 1923/1924 (35→55→65 W measured as package power under
 //! load), fan boost via the 0x40 bit of EC 1873, mode button = WMI event 176 =
@@ -16,8 +16,10 @@ use crate::{EcAccess, HwError, HwResult};
 /// Hard ceiling for any PL1/PL2 we write: the stock app's own Turbo value for this
 /// machine (Smart APC table, 80 W). Above this we refuse, whatever the config says.
 pub const PL_CEILING_W: u8 = 80;
-/// Same idea for the GPU cTGP offset (stock Turbo value is 20 W).
+/// Same idea for the GPU cTGP offset.
 pub const CTGP_CEILING_W: u8 = 25;
+/// Ceiling for the peak power limit (PL4): the stock value of all three profiles on this machine.
+pub const PL4_CEILING_W: u8 = 145;
 /// `KEY_F14`: what the kernel's `uniwill-wmi` emits for the mode button.
 pub const MODE_KEY_CODE: u16 = 184;
 
@@ -30,8 +32,15 @@ const STASH_PATH: &str = "/run/ripple-nova-fan-mode";
 pub struct Preset {
     pub pl1: u8,
     pub pl2: u8,
+    /// Peak power (PL4/fPPT) via EC 1925. A preset saved before it existed gets the stock value.
+    #[serde(default = "default_pl4")]
+    pub pl4: u8,
     /// GPU configurable-TGP offset in watts (kernel `ctgp_offset`).
     pub ctgp: u8,
+}
+
+fn default_pl4() -> u8 {
+    PL4_CEILING_W
 }
 
 impl Preset {
@@ -45,6 +54,12 @@ impl Preset {
         if self.pl1 > self.pl2 {
             return Err(format!("PL1 {} W is above PL2 {} W", self.pl1, self.pl2));
         }
+        if !(self.pl2..=PL4_CEILING_W).contains(&self.pl4) {
+            return Err(format!(
+                "PL4 must be PL2..={PL4_CEILING_W} W (got {} with PL2 {})",
+                self.pl4, self.pl2
+            ));
+        }
         if self.ctgp > CTGP_CEILING_W {
             return Err(format!(
                 "cTGP offset must be 0..={CTGP_CEILING_W} W (got {})",
@@ -55,22 +70,23 @@ impl Preset {
     }
 }
 
-/// A profile the user can pick: one of the three stock ones (read-only, they are the
-/// firmware/stock-app values) or their own `Custom` preset.
+/// A profile the user can pick: one of the three stock ones (read-only, they are the EC's own
+/// defaults) or one of their own, by its index in `Config::profiles`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     Stock(OperatingMode),
-    Custom,
+    Custom(usize),
 }
 
 impl Profile {
-    /// The names the Windows app shows (our `OperatingMode` Office/Gaming/Turbo, same three lights).
+    /// The OEM's own mode names (its profile data says Office / Gaming / Turbo; the Windows app only
+    /// labels them Balanced / Enthusiast / Overboost, translated per language, in its UI strings).
     pub fn name(self) -> &'static str {
         match self {
-            Self::Stock(OperatingMode::Office) => "Balanced",
-            Self::Stock(OperatingMode::Gaming) => "Enthusiast",
-            Self::Stock(OperatingMode::Turbo) => "Overboost",
-            Self::Custom => "Custom",
+            Self::Stock(OperatingMode::Office) => "Office",
+            Self::Stock(OperatingMode::Gaming) => "Gaming",
+            Self::Stock(OperatingMode::Turbo) => "Turbo",
+            Self::Custom(_) => "Custom",
         }
     }
 
@@ -93,7 +109,7 @@ impl Profile {
     pub fn after_button(current: Option<Self>) -> Self {
         match current {
             Some(Self::Stock(m)) => Self::Stock(m.next()),
-            Some(Self::Custom) => Self::Stock(OperatingMode::Gaming.next()),
+            Some(Self::Custom(_)) => Self::Stock(OperatingMode::Gaming.next()),
             None => Self::Stock(OperatingMode::Office),
         }
     }
@@ -106,7 +122,7 @@ impl Profile {
         match self {
             Self::Stock(OperatingMode::Office) => 0xA,
             Self::Stock(OperatingMode::Turbo) => 0x3,
-            Self::Stock(OperatingMode::Gaming) | Self::Custom => 0x0,
+            Self::Stock(OperatingMode::Gaming) | Self::Custom(_) => 0x0,
         }
     }
 }
@@ -117,42 +133,55 @@ pub const STOCK_MODES: [OperatingMode; 3] = [
     OperatingMode::Turbo,
 ];
 
-/// The stock presets, in `STOCK_MODES` order. Not editable and not saved: Office/Gaming are the
-/// EC's own default registers (1844/1845, 1840/1841); Turbo is the stock app's Smart APC table
-/// for this machine (PL 80/80, cTGP +20 W), read from its Windows registry.
+/// The stock presets, in `STOCK_MODES` order. Not editable and not saved: the EC holds a default
+/// PL1/PL2/PL4 slot for each mode, and the Windows app shows exactly these (Office 35/35/145, Gaming
+/// 55/55/145, Turbo 65/65/145; none unlocks the GPU cTGP). The OEM names the third slot "BatterySaver",
+/// but its values are Windows' Turbo. A slot that cannot be read falls back to the value in the table.
 pub fn stock(ec: Option<&mut (dyn EcAccess + '_)>) -> [Preset; 3] {
-    let mut office = Preset {
-        pl1: 35,
-        pl2: 35,
-        ctgp: 0,
-    };
-    let mut gaming = Preset {
-        pl1: 55,
-        pl2: 55,
-        ctgp: 0,
-    };
-    if let Some(ec) = ec {
-        let mut rd = |a: u16, d: u8| ec.read(a).ok().filter(|v| *v >= 5).unwrap_or(d);
-        office = Preset {
-            pl1: rd(addr::OFFICE_PL1_DEFAULT, 35),
-            pl2: rd(addr::OFFICE_PL2_DEFAULT, 35),
-            ctgp: 0,
-        };
-        gaming = Preset {
-            pl1: rd(addr::GAMING_PL1_DEFAULT, 55),
-            pl2: rd(addr::GAMING_PL2_DEFAULT, 55),
-            ctgp: 0,
-        };
-    }
-    [
-        office,
-        gaming,
+    // ((PL1, PL2, PL4) default registers, the values they are expected to hold)
+    const SLOTS: [([u16; 3], [u8; 3]); 3] = [
+        (
+            [
+                addr::OFFICE_PL1_DEFAULT,
+                addr::OFFICE_PL2_DEFAULT,
+                addr::OFFICE_PL4_DEFAULT,
+            ],
+            [35, 35, 145],
+        ),
+        (
+            [
+                addr::GAMING_PL1_DEFAULT,
+                addr::GAMING_PL2_DEFAULT,
+                addr::GAMING_PL4_DEFAULT,
+            ],
+            [55, 55, 145],
+        ),
+        (
+            [
+                addr::BATTERYSAVER_PL1_DEFAULT,
+                addr::BATTERYSAVER_PL2_DEFAULT,
+                addr::BATTERYSAVER_PL4_DEFAULT,
+            ],
+            [65, 65, 145],
+        ),
+    ];
+    let mut ec = ec;
+    SLOTS.map(|(regs, dflt)| {
+        let mut v = dflt;
+        if let Some(ec) = ec.as_deref_mut() {
+            for (v, reg) in v.iter_mut().zip(regs) {
+                if let Some(read) = ec.read(reg).ok().filter(|r| *r >= 5) {
+                    *v = read;
+                }
+            }
+        }
         Preset {
-            pl1: 80,
-            pl2: 80,
-            ctgp: 20,
-        },
-    ]
+            pl1: v[0],
+            pl2: v[1],
+            pl4: v[2],
+            ctgp: 0,
+        }
+    })
 }
 
 /// Keyboard colour as hue/saturation/brightness. The EC only stores per-channel levels, so
@@ -225,16 +254,37 @@ pub fn default_custom() -> Preset {
     Preset {
         pl1: 45,
         pl2: 45,
+        pl4: PL4_CEILING_W,
         ctgp: 0,
     }
+}
+
+/// A profile the user made: its name, the stock profile it started from (what "reset" goes back to)
+/// and its own limits. The stock profiles themselves are never editable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomProfile {
+    pub name: String,
+    pub base: OperatingMode,
+    pub preset: Preset,
+}
+
+/// "Profile 1", "Profile 2", …: the lowest number no profile has taken yet.
+pub fn next_profile_name(profiles: &[CustomProfile]) -> String {
+    (1..)
+        .map(|n| format!("Profile {n}"))
+        .find(|name| profiles.iter().all(|p| p.name != *name))
+        .unwrap_or_default()
 }
 
 /// Saved settings (`/etc/ripple-nova/config.json`). Stock presets are deliberately absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
-    /// The user's own preset, the only editable one.
-    #[serde(default = "default_custom")]
-    pub custom: Preset,
+    /// The user's own profiles, in the order they were made.
+    #[serde(default)]
+    pub profiles: Vec<CustomProfile>,
+    /// The single custom preset of older versions: it becomes "Profile 1" on load and is not written back.
+    #[serde(default, skip_serializing)]
+    custom: Option<Preset>,
     /// Keyboard colour/brightness as last chosen (`None` = never set: read it from the EC).
     #[serde(default)]
     pub keyboard: Option<Hsv>,
@@ -259,26 +309,40 @@ fn yes() -> bool {
 impl Config {
     pub const PATH: &'static str = "/etc/ripple-nova/config.json";
 
-    /// Saved config (unknown/old fields ignored, an invalid custom preset reset), else defaults.
+    /// Saved config (unknown/old fields ignored, an invalid profile dropped), else defaults.
     pub fn load() -> Self {
         let mut cfg = std::fs::read_to_string(Self::PATH)
             .ok()
             .and_then(|t| serde_json::from_str::<Self>(&t).ok())
             .unwrap_or(Self {
-                custom: default_custom(),
+                profiles: Vec::new(),
+                custom: None,
                 keyboard: None,
                 auto_boost_above: None,
                 fan: FanCurves::default(),
                 keyboard_level: None,
                 touchpad_on: true,
             });
-        if cfg.custom.validate().is_err() {
-            cfg.custom = default_custom();
-        }
-        if cfg.fan.validate().is_err() {
-            cfg.fan = FanCurves::default(); // also switches it off
-        }
+        cfg.settle();
         cfg
+    }
+
+    /// Bring an old or damaged config in line: the single custom preset of older versions becomes the
+    /// first profile (only when it was changed from the default), invalid profiles and curves are dropped.
+    fn settle(&mut self) {
+        if let Some(old) = self.custom.take() {
+            if self.profiles.is_empty() && old != default_custom() {
+                self.profiles.push(CustomProfile {
+                    name: next_profile_name(&[]),
+                    base: OperatingMode::Gaming,
+                    preset: old,
+                });
+            }
+        }
+        self.profiles.retain(|c| c.preset.validate().is_ok());
+        if self.fan.validate().is_err() {
+            self.fan = FanCurves::default(); // also switches it off
+        }
     }
 
     pub fn save(&self) -> HwResult<()> {
@@ -292,17 +356,35 @@ impl Config {
     }
 }
 
-/// Apply a preset: PL2/PL1 via EC (read back to verify), cTGP via the kernel attr.
+/// Apply a preset: PL1/PL2/PL4 via EC (read back to verify), cTGP via the kernel attr.
 pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwResult<()> {
     p.validate().map_err(HwError::Other)?;
-    // Keep PL1 <= PL2 at every step: raise PL2 first, lower PL1 first.
-    let cur_pl2 = ec.read(addr::PL2_SETTING)?;
-    if p.pl2 >= cur_pl2 {
-        ec.write_verified(addr::PL2_SETTING, p.pl2)?;
-        ec.write_verified(addr::PL1_SETTING, p.pl1)?;
-    } else {
-        ec.write_verified(addr::PL1_SETTING, p.pl1)?;
-        ec.write_verified(addr::PL2_SETTING, p.pl2)?;
+    // Keep PL1 <= PL2 <= PL4 at every step: what goes up is written from the top down (PL4, PL2,
+    // PL1), what goes down from the bottom up.
+    let (mut up, mut down) = (Vec::new(), Vec::new());
+    for (reg, want) in [
+        (addr::PL1_SETTING, p.pl1),
+        (addr::PL2_SETTING, p.pl2),
+        (addr::PL4_SETTING, p.pl4),
+    ] {
+        // PL4 is best effort: an EC that refuses it must not stop the limits that matter, nor the
+        // daemon at boot (the window shows the live PL4, so a refusal is visible there)
+        let now = if reg == addr::PL4_SETTING {
+            ec.read(reg).unwrap_or(0)
+        } else {
+            ec.read(reg)?
+        };
+        if want >= now {
+            up.push((reg, want));
+        } else {
+            down.push((reg, want));
+        }
+    }
+    for (reg, want) in up.into_iter().rev().chain(down) {
+        match ec.write_verified(reg, want) {
+            Err(e) if reg == addr::PL4_SETTING => eprintln!("PL4 not applied: {e}"),
+            r => r?,
+        }
     }
     if let Some(u) = sysfs.filter(|u| u.get_attr("ctgp_offset").is_ok()) {
         u.set_attr("ctgp_offset", &p.ctgp.to_string())?;
@@ -317,33 +399,99 @@ pub fn apply(ec: &mut dyn EcAccess, sysfs: Option<&SysfsEc>, p: Preset) -> HwRes
     Ok(())
 }
 
-/// Which profile the EC is running, judged by its PL1/PL2 setting registers. Stock profiles win
-/// over Custom when both match. Both registers read 0 until something applies limits (fresh boot,
-/// or the EC still in the state Windows left it): then the EC runs its own profile and its mode
-/// byte (the button's lights) says which, so the profile is read from there.
+/// The custom profile applied last, by name. Limits alone cannot tell a profile from the stock one it
+/// was copied from, so this settles which of the two is running. In tmpfs: after a reboot the EC's
+/// limits are unset anyway and the lights decide.
+const HINT_PATH: &str = "/run/ripple-nova-profile-hint";
+
+/// Note what was just applied: a custom profile's name, or nothing for a stock one.
+pub fn remember_profile(customs: &[CustomProfile], p: Profile) {
+    match p {
+        Profile::Custom(i) if i < customs.len() => {
+            let _ = std::fs::write(HINT_PATH, &customs[i].name);
+        }
+        _ => {
+            let _ = std::fs::remove_file(HINT_PATH);
+        }
+    }
+}
+
+/// Index of the custom profile applied last, if it still exists.
+pub fn remembered_profile(customs: &[CustomProfile]) -> Option<usize> {
+    let name = std::fs::read_to_string(HINT_PATH).ok()?;
+    customs.iter().position(|c| c.name == name.trim())
+}
+
+/// `current`, with the profile applied last as the tie-break: what is running now.
+pub fn running(
+    ec: &mut dyn EcAccess,
+    stock: &[Preset; 3],
+    customs: &[CustomProfile],
+) -> HwResult<Option<Profile>> {
+    current(ec, stock, customs, remembered_profile(customs))
+}
+
+/// Which profile the EC is running, judged by its PL1/PL2 setting registers. `applied_last` (a custom
+/// profile) wins when its limits still match, even over a stock profile with the same limits;
+/// otherwise stock profiles win over custom ones. Both registers read 0 until something applies
+/// limits (fresh boot, or the EC still in the state Windows left it): then the EC runs its own
+/// profile and its mode byte (the button's lights) says which, so the profile is read from there.
 pub fn current(
     ec: &mut dyn EcAccess,
     stock: &[Preset; 3],
-    custom: &Preset,
+    customs: &[CustomProfile],
+    applied_last: Option<usize>,
 ) -> HwResult<Option<Profile>> {
     let now = (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?);
-    let hit = |p: &Preset| (p.pl1, p.pl2) == now;
-    let by_limits = STOCK_MODES
+    let last = applied_last.filter(|i| {
+        customs
+            .get(*i)
+            .is_some_and(|c| (c.preset.pl1, c.preset.pl2) == now)
+    });
+    if let Some(i) = last {
+        return Ok(Some(Profile::Custom(i)));
+    }
+    let mut by_limits = STOCK_MODES
         .into_iter()
         .zip(stock)
-        .find(|(_, p)| hit(p))
-        .map(|(m, _)| Profile::Stock(m))
-        .or_else(|| hit(custom).then_some(Profile::Custom));
+        .find(|(_, p)| (p.pl1, p.pl2) == now)
+        .map(|(m, _)| Profile::Stock(m));
+    if by_limits.is_none() {
+        by_limits = custom_by_limits(ec, customs, now)?.map(Profile::Custom);
+    }
     if by_limits.is_some() || now != (0, 0) {
         return Ok(by_limits);
     }
     Ok(Profile::from_mode_byte(ec.read(addr::MAFAN_CONTROL_BYTE)?))
 }
 
-pub fn preset_for(stock: &[Preset; 3], custom: &Preset, p: Profile) -> Preset {
+/// The custom profile with these limits; when several share them, the one whose PL4 the EC reports.
+fn custom_by_limits(
+    ec: &mut dyn EcAccess,
+    customs: &[CustomProfile],
+    now: (u8, u8),
+) -> HwResult<Option<usize>> {
+    let hits: Vec<usize> = customs
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| (c.preset.pl1, c.preset.pl2) == now)
+        .map(|(i, _)| i)
+        .collect();
+    if hits.len() < 2 {
+        return Ok(hits.first().copied());
+    }
+    let pl4 = ec.read(addr::PL4_SETTING)?;
+    Ok(hits
+        .iter()
+        .copied()
+        .find(|i| customs[*i].preset.pl4 == pl4)
+        .or_else(|| hits.first().copied()))
+}
+
+pub fn preset_for(stock: &[Preset; 3], customs: &[CustomProfile], p: Profile) -> Preset {
     match p {
         Profile::Stock(m) => stock[m as usize],
-        Profile::Custom => *custom,
+        Profile::Custom(i) => customs.get(i).map_or_else(default_custom, |c| c.preset),
     }
 }
 
@@ -354,15 +502,18 @@ pub fn adopt(
     ec: &mut dyn EcAccess,
     sysfs: Option<&SysfsEc>,
     stock: &[Preset; 3],
-    custom: &Preset,
+    customs: &[CustomProfile],
 ) -> HwResult<Option<Profile>> {
-    let Some(p) = current(ec, stock, custom)? else {
+    let Some(p) = running(ec, stock, customs)? else {
         return Ok(None);
     };
     if (ec.read(addr::PL1_SETTING)?, ec.read(addr::PL2_SETTING)?) == (0, 0) {
-        apply(ec, sysfs, preset_for(stock, custom, p))?;
+        apply(ec, sysfs, preset_for(stock, customs, p))?;
     }
-    set_mode_byte(ec, p)?;
+    // what the EC's own byte already announces (Windows leaves Turbo as 0x10) is not rewritten
+    if Profile::from_mode_byte(ec.read(addr::MAFAN_CONTROL_BYTE)?) != Some(p) {
+        set_mode_byte(ec, p)?;
+    }
     Ok(Some(p))
 }
 
@@ -712,7 +863,7 @@ pub fn fan_release(ec: &mut dyn EcAccess) -> HwResult<()> {
         return Ok(());
     }
     if is_boosted(byte) {
-        set_boost(ec, false)?; // restores the pre-boost mode, or Enthusiast (nibble 0) without a stash
+        set_boost(ec, false)?; // restores the pre-boost mode, or Gaming (nibble 0) without a stash
     } else {
         ec.write(addr::MAFAN_CONTROL_BYTE, byte & !MANUAL_BIT)?;
     }
@@ -722,7 +873,7 @@ pub fn fan_release(ec: &mut dyn EcAccess) -> HwResult<()> {
 /// Drives the two fans from the custom curves; call `tick` every `FAN_TICK`.
 pub struct FanEngine {
     duty: [u8; 2],
-    /// Is the manual bit ours? Enthusiast + manual is byte 0x40, exactly the Boost byte: without
+    /// Is the manual bit ours? Gaming + manual is byte 0x40, exactly the Boost byte: without
     /// this marker a boosted byte is the user's and left alone.
     ours: bool,
     /// The EC sets both duties to full when the mode byte changes; wait before writing ours.
@@ -855,7 +1006,7 @@ pub fn touchpad_loop(stop: &std::sync::atomic::AtomicBool) {
     }
 }
 
-/// Is Boost on? Boost is the manual bit with both duties at full (200). In Enthusiast the custom fan
+/// Is Boost on? Boost is the manual bit with both duties at full (200). In Gaming the custom fan
 /// profile's manual byte is the very same `0x40`, and while the engine hands the fans back after the
 /// profile is switched off the byte is still set: the duties (the profile's curve, not full) tell them apart.
 fn boost_is_on(ec: &mut dyn EcAccess) -> bool {
@@ -872,7 +1023,7 @@ pub fn observed(
     cfg: &Config,
 ) -> crate::notify::Observed {
     crate::notify::Observed {
-        profile: current(ec, stock, &cfg.custom).ok().flatten(),
+        profile: running(ec, stock, &cfg.profiles).ok().flatten(),
         pl: ec
             .read(addr::PL1_SETTING)
             .ok()
@@ -884,7 +1035,7 @@ pub fn observed(
     }
 }
 
-/// Where the daemon publishes the profile it sees, as a lowercase name (`balanced`, `enthusiast`, `overboost`,
+/// Where the daemon publishes the profile it sees, as a lowercase name (`office`, `gaming`, `turbo`,
 /// `custom`, `unknown`), rewritten every second. World-readable: the tray icon runs as the desktop user, cannot
 /// read the EC, and treats a file older than a few seconds as "the daemon is not running".
 pub const PROFILE_FILE: &str = "/run/ripple-nova-profile";
@@ -1045,6 +1196,7 @@ mod tests {
         assert!(Preset {
             pl1: 35,
             pl2: 35,
+            pl4: 145,
             ctgp: 0
         }
         .validate()
@@ -1052,6 +1204,7 @@ mod tests {
         assert!(Preset {
             pl1: 80,
             pl2: 80,
+            pl4: 145,
             ctgp: 20
         }
         .validate()
@@ -1059,6 +1212,7 @@ mod tests {
         assert!(Preset {
             pl1: 81,
             pl2: 81,
+            pl4: 145,
             ctgp: 0
         }
         .validate()
@@ -1066,6 +1220,7 @@ mod tests {
         assert!(Preset {
             pl1: 60,
             pl2: 50,
+            pl4: 145,
             ctgp: 0
         }
         .validate()
@@ -1073,6 +1228,7 @@ mod tests {
         assert!(Preset {
             pl1: 4,
             pl2: 40,
+            pl4: 145,
             ctgp: 0
         }
         .validate()
@@ -1080,10 +1236,101 @@ mod tests {
         assert!(Preset {
             pl1: 35,
             pl2: 35,
+            pl4: 145,
             ctgp: 26
         }
         .validate()
         .is_err());
+        // PL4 is the peak: not below PL2, not above the stock value
+        let with_pl4 = |pl4| Preset {
+            pl1: 35,
+            pl2: 35,
+            pl4,
+            ctgp: 0,
+        };
+        assert!(with_pl4(35).validate().is_ok());
+        assert!(with_pl4(145).validate().is_ok());
+        assert!(with_pl4(34).validate().is_err());
+        assert!(with_pl4(146).validate().is_err());
+    }
+
+    #[test]
+    fn a_preset_saved_before_pl4_existed_gets_the_stock_value() {
+        let p: Preset = serde_json::from_str(r#"{"pl1":45,"pl2":45,"ctgp":0}"#).unwrap();
+        assert_eq!(p.pl4, PL4_CEILING_W);
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn stock_presets_come_from_the_ecs_default_slots() {
+        // what the EC holds on this machine, and what the Windows app shows for each mode
+        let table = [
+            (OperatingMode::Office, [35, 35, 145]),
+            (OperatingMode::Gaming, [55, 55, 145]),
+            (OperatingMode::Turbo, [65, 65, 145]),
+        ];
+        let mut ec = crate::mock::MockEc::new();
+        for (reg, v) in [
+            (addr::OFFICE_PL1_DEFAULT, 35),
+            (addr::OFFICE_PL2_DEFAULT, 35),
+            (addr::OFFICE_PL4_DEFAULT, 145),
+            (addr::GAMING_PL1_DEFAULT, 55),
+            (addr::GAMING_PL2_DEFAULT, 55),
+            (addr::GAMING_PL4_DEFAULT, 145),
+            (addr::BATTERYSAVER_PL1_DEFAULT, 65),
+            (addr::BATTERYSAVER_PL2_DEFAULT, 65),
+            (addr::BATTERYSAVER_PL4_DEFAULT, 145),
+        ] {
+            ec.write(reg, v).unwrap();
+        }
+        // another machine would hold other values: the presets follow the EC, not a table
+        let mut other = ec.clone();
+        other.write(addr::GAMING_PL4_DEFAULT, 120).unwrap();
+        assert_eq!(
+            stock(Some(&mut other))[OperatingMode::Gaming as usize].pl4,
+            120
+        );
+        for (mode, [pl1, pl2, pl4]) in table {
+            let want = Preset {
+                pl1,
+                pl2,
+                pl4,
+                ctgp: 0,
+            };
+            assert_eq!(stock(Some(&mut ec))[mode as usize], want);
+            // no EC, or slots that read as unset, fall back to the same values
+            assert_eq!(stock(None)[mode as usize], want);
+            assert_eq!(
+                stock(Some(&mut crate::mock::MockEc::new()))[mode as usize],
+                want
+            );
+            assert!(want.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn apply_writes_pl4_with_the_limits() {
+        let p = |pl1, pl2, pl4| Preset {
+            pl1,
+            pl2,
+            pl4,
+            ctgp: 0,
+        };
+        let limits = |ec: &mut crate::mock::MockEc| {
+            [addr::PL1_SETTING, addr::PL2_SETTING, addr::PL4_SETTING].map(|a| ec.read(a).unwrap())
+        };
+        // from an unset EC (right after boot): all three go up
+        let mut ec = crate::mock::MockEc::new();
+        apply(&mut ec, None, p(55, 55, 145)).unwrap();
+        assert_eq!(limits(&mut ec), [55, 55, 145]);
+        // everything down, and a mix of up and down
+        apply(&mut ec, None, p(35, 35, 100)).unwrap();
+        assert_eq!(limits(&mut ec), [35, 35, 100]);
+        apply(&mut ec, None, p(65, 65, 90)).unwrap();
+        assert_eq!(limits(&mut ec), [65, 65, 90]);
+        // an invalid preset writes nothing
+        assert!(apply(&mut ec, None, p(65, 65, 60)).is_err());
+        assert_eq!(limits(&mut ec), [65, 65, 90]);
     }
 
     #[test]
@@ -1136,7 +1383,7 @@ mod tests {
             Profile::Stock(Office)
         );
         assert_eq!(
-            Profile::after_button(Some(Profile::Custom)),
+            Profile::after_button(Some(Profile::Custom(0))),
             Profile::Stock(Turbo)
         ); // shows as 1 light
         assert_eq!(Profile::after_button(None), Profile::Stock(Office));
@@ -1222,29 +1469,43 @@ mod tests {
             }
         }
         let st = stock(None);
-        let custom = Preset {
+        let custom = [custom_profile(Preset {
             pl1: 35,
             pl2: 35,
+            pl4: 145,
             ctgp: 5,
-        }; // same limits as Office
+        })]; // same limits as Office
         assert_eq!(
-            current(&mut Fake(35, 35), &st, &custom).unwrap(),
+            current(&mut Fake(35, 35), &st, &custom, None).unwrap(),
             Some(Profile::Stock(OperatingMode::Office))
         );
         assert_eq!(
             current(
                 &mut Fake(45, 45),
                 &st,
-                &Preset {
+                &[custom_profile(Preset {
                     pl1: 45,
                     pl2: 45,
+                    pl4: 145,
                     ctgp: 0
-                }
+                })],
+                None
             )
             .unwrap(),
-            Some(Profile::Custom)
+            Some(Profile::Custom(0))
         );
-        assert_eq!(current(&mut Fake(50, 50), &st, &custom).unwrap(), None);
+        assert_eq!(
+            current(&mut Fake(50, 50), &st, &custom, None).unwrap(),
+            None
+        );
+    }
+
+    fn custom_profile(preset: Preset) -> CustomProfile {
+        CustomProfile {
+            name: "Profile 1".into(),
+            base: OperatingMode::Gaming,
+            preset,
+        }
     }
 
     fn ec_with(pl: (u8, u8), mode_byte: u8) -> crate::mock::MockEc {
@@ -1355,7 +1616,7 @@ mod tests {
         let mut ec = FanEc(
             crate::mock::MockEc::with(addr::MAFAN_CONTROL_BYTE, 0xA7),
             [60, 0],
-        ); // Balanced
+        ); // Office
         let cfg = FanCurves {
             enabled: true,
             ..FanCurves::default()
@@ -1448,12 +1709,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join(format!("ripple-profile-test-{}", std::process::id()));
         publish_profile(&path, Some(Profile::Stock(OperatingMode::Office)));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "balanced");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "office");
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o644
         );
-        publish_profile(&path, Some(Profile::Custom));
+        publish_profile(&path, Some(Profile::Custom(0)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "custom");
         publish_profile(&path, None);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "unknown");
@@ -1479,10 +1740,10 @@ mod tests {
             ))
         };
         assert!(boosted(0x47, [200, 200])); // Boost
-        assert!(!boosted(0x47, [60, 40])); // the custom profile's byte in Enthusiast, curve duties: not a boost
+        assert!(!boosted(0x47, [60, 40])); // the custom profile's byte in Gaming, curve duties: not a boost
         assert!(!boosted(0x47, [200, 40])); // one fan at full only
         assert!(!boosted(0x07, [200, 200])); // no manual bit
-        assert!(!boosted(0xE7, [200, 200])); // Balanced + manual is not the boost nibble
+        assert!(!boosted(0xE7, [200, 200])); // Office + manual is not the boost nibble
     }
 
     #[test]
@@ -1564,12 +1825,8 @@ mod tests {
     fn boot_state_is_read_from_the_mode_byte() {
         use OperatingMode::*;
         let st = stock(None);
-        let custom = Preset {
-            pl1: 45,
-            pl2: 45,
-            ctgp: 0,
-        };
-        let cur = |pl, byte| current(&mut ec_with(pl, byte), &st, &custom).unwrap();
+        let custom = [custom_profile(default_custom())];
+        let cur = |pl, byte| current(&mut ec_with(pl, byte), &st, &custom, None).unwrap();
         // measured right after a boot on the real machine: PL regs 0/0, mode byte 0x00 (1 light)
         assert_eq!(cur((0, 0), 0x00), Some(Profile::Stock(Gaming)));
         assert_eq!(cur((0, 0), 0xA7), Some(Profile::Stock(Office)));
@@ -1587,11 +1844,7 @@ mod tests {
     #[test]
     fn adopt_writes_the_limits_of_the_profile_the_lights_show() {
         let st = stock(None);
-        let custom = Preset {
-            pl1: 45,
-            pl2: 45,
-            ctgp: 0,
-        };
+        let custom = [custom_profile(default_custom())];
         let mut ec = ec_with((0, 0), 0x07);
         let p = adopt(&mut ec, None, &st, &custom).unwrap();
         assert_eq!(p, Some(Profile::Stock(OperatingMode::Gaming)));
@@ -1607,8 +1860,183 @@ mod tests {
         let mut ec = ec_with((45, 45), 0x07);
         assert_eq!(
             adopt(&mut ec, None, &st, &custom).unwrap(),
-            Some(Profile::Custom)
+            Some(Profile::Custom(0))
         );
         assert_eq!(ec.read(addr::PL1_SETTING).unwrap(), 45);
+    }
+
+    #[test]
+    fn a_pl4_the_ec_refuses_does_not_stop_the_limits_that_matter() {
+        let mut ec = crate::mock::MockEc::new();
+        ec.fail_on.push(addr::PL4_SETTING);
+        let p = Preset {
+            pl1: 55,
+            pl2: 55,
+            pl4: 145,
+            ctgp: 0,
+        };
+        apply(&mut ec, None, p).unwrap();
+        ec.fail_on.clear();
+        assert_eq!(ec.read(addr::PL1_SETTING).unwrap(), 55);
+        assert_eq!(ec.read(addr::PL2_SETTING).unwrap(), 55);
+        assert_eq!(ec.read(addr::PL4_SETTING).unwrap(), 0);
+        // PL1 and PL2 still have to take
+        let mut ec = crate::mock::MockEc::new();
+        ec.fail_on.push(addr::PL1_SETTING);
+        assert!(apply(&mut ec, None, p).is_err());
+    }
+
+    #[test]
+    fn adopt_after_a_windows_session_in_turbo_writes_its_limits_and_keeps_the_byte() {
+        // measured: limits 0/0/0 and mode byte 0x10, Windows' own Turbo
+        let st = stock(None);
+        let mut ec = ec_with((0, 0), 0x10);
+        assert_eq!(
+            adopt(&mut ec, None, &st, &[]).unwrap(),
+            Some(Profile::Stock(OperatingMode::Turbo))
+        );
+        let limits =
+            [addr::PL1_SETTING, addr::PL2_SETTING, addr::PL4_SETTING].map(|a| ec.read(a).unwrap());
+        assert_eq!(limits, [65, 65, 145]); // the same numbers the Windows app shows for it
+        assert_eq!(ec.read(addr::MAFAN_CONTROL_BYTE).unwrap(), 0x10); // not rewritten
+    }
+
+    #[test]
+    fn several_custom_profiles_are_told_apart() {
+        let st = stock(None);
+        let make = |name: &str, pl1, pl2, pl4| CustomProfile {
+            name: name.into(),
+            base: OperatingMode::Gaming,
+            preset: Preset {
+                pl1,
+                pl2,
+                pl4,
+                ctgp: 0,
+            },
+        };
+        let customs = [
+            make("Profile 1", 45, 45, 145),
+            make("Profile 2", 60, 60, 100),
+            make("Profile 3", 60, 60, 120),
+        ];
+        let at = |pl: (u8, u8), pl4: u8| {
+            let mut ec = ec_with(pl, 0x00);
+            ec.write(addr::PL4_SETTING, pl4).unwrap();
+            current(&mut ec, &st, &customs, None).unwrap()
+        };
+        assert_eq!(at((45, 45), 145), Some(Profile::Custom(0)));
+        // two profiles share 60/60: the EC's PL4 says which
+        assert_eq!(at((60, 60), 100), Some(Profile::Custom(1)));
+        assert_eq!(at((60, 60), 120), Some(Profile::Custom(2)));
+        // PL4 matching none of them: the first with these limits
+        assert_eq!(at((60, 60), 0), Some(Profile::Custom(1)));
+        // a stock profile wins over a custom one with the same limits
+        let same_as_gaming = [make("Profile 1", 55, 55, 145)];
+        let mut ec = ec_with((55, 55), 0x00);
+        assert_eq!(
+            current(&mut ec, &st, &same_as_gaming, None).unwrap(),
+            Some(Profile::Stock(OperatingMode::Gaming))
+        );
+        // what to apply for each, and for an index that no longer exists
+        assert_eq!(
+            preset_for(&st, &customs, Profile::Custom(1)),
+            customs[1].preset
+        );
+        assert_eq!(
+            preset_for(&st, &customs, Profile::Custom(9)),
+            default_custom()
+        );
+    }
+
+    #[test]
+    fn the_profile_applied_last_settles_a_copy_of_a_stock_profile() {
+        use OperatingMode::*;
+        let st = stock(None);
+        // "Profile 1" was made as a copy of Gaming: the same limits
+        let customs = [CustomProfile {
+            name: "Profile 1".into(),
+            base: Gaming,
+            preset: st[Gaming as usize],
+        }];
+        let mut ec = ec_with((55, 55), 0x00);
+        assert_eq!(
+            current(&mut ec, &st, &customs, None).unwrap(),
+            Some(Profile::Stock(Gaming))
+        );
+        assert_eq!(
+            current(&mut ec, &st, &customs, Some(0)).unwrap(),
+            Some(Profile::Custom(0))
+        );
+        // limits that moved on (the button, Windows) beat what was applied last
+        let mut moved = ec_with((35, 35), 0x00);
+        assert_eq!(
+            current(&mut moved, &st, &customs, Some(0)).unwrap(),
+            Some(Profile::Stock(Office))
+        );
+        // a profile that no longer exists is ignored
+        assert_eq!(
+            current(&mut ec, &st, &customs, Some(7)).unwrap(),
+            Some(Profile::Stock(Gaming))
+        );
+    }
+
+    #[test]
+    fn profiles_are_named_in_order_and_gaps_are_reused() {
+        let named = |names: &[&str]| -> Vec<CustomProfile> {
+            names
+                .iter()
+                .map(|n| CustomProfile {
+                    name: (*n).into(),
+                    base: OperatingMode::Office,
+                    preset: default_custom(),
+                })
+                .collect()
+        };
+        assert_eq!(next_profile_name(&[]), "Profile 1");
+        assert_eq!(next_profile_name(&named(&["Profile 1"])), "Profile 2");
+        assert_eq!(
+            next_profile_name(&named(&["Profile 1", "Profile 3"])),
+            "Profile 2"
+        );
+        assert_eq!(next_profile_name(&named(&["Mine"])), "Profile 1");
+    }
+
+    #[test]
+    fn the_single_custom_preset_of_older_versions_becomes_profile_1() {
+        let load = |json: &str| {
+            let mut cfg: Config = serde_json::from_str(json).unwrap();
+            cfg.settle();
+            cfg
+        };
+        // changed from the default: kept, as the first profile, based on Gaming
+        let cfg = load(r#"{"custom":{"pl1":50,"pl2":60,"ctgp":5}}"#);
+        assert_eq!(cfg.profiles.len(), 1);
+        assert_eq!(cfg.profiles[0].name, "Profile 1");
+        assert_eq!(cfg.profiles[0].base, OperatingMode::Gaming);
+        assert_eq!(
+            cfg.profiles[0].preset,
+            Preset {
+                pl1: 50,
+                pl2: 60,
+                pl4: PL4_CEILING_W,
+                ctgp: 5
+            }
+        );
+        // never customised: nothing to keep
+        let untouched = serde_json::to_string(&default_custom()).unwrap();
+        assert!(load(&format!(r#"{{"custom":{untouched}}}"#))
+            .profiles
+            .is_empty());
+        // the new format wins over a leftover old key, and an invalid profile is dropped
+        let cfg = load(
+            r#"{"custom":{"pl1":50,"pl2":60,"ctgp":0},"profiles":[
+                {"name":"A","base":"turbo","preset":{"pl1":40,"pl2":40,"pl4":100,"ctgp":0}},
+                {"name":"Bad","base":"office","preset":{"pl1":90,"pl2":90,"pl4":100,"ctgp":0}}]}"#,
+        );
+        assert_eq!(cfg.profiles.len(), 1);
+        assert_eq!(cfg.profiles[0].name, "A");
+        assert_eq!(cfg.profiles[0].base, OperatingMode::Turbo);
+        // the old key is never written back
+        assert!(!serde_json::to_string(&cfg).unwrap().contains("\"custom\""));
     }
 }

@@ -26,10 +26,10 @@ use gpui::{
     PathBuilder, Pixels, ResizeEdge, SharedString, Stateful, TitlebarOptions, Window, WindowBounds,
     WindowDecorations, WindowOptions,
 };
-use hw::{FanMode, Field, Hw, Snapshot, PROFILES};
+use hw::{FanMode, Field, Hw, Snapshot, STOCK_PROFILES};
 use input::{Outcome, TextInput};
 use ripple_core::modes::OperatingMode;
-use ripple_hw::control::{self, Hsv, Preset, Profile};
+use ripple_hw::control::{self, Hsv, Profile};
 use ripple_hw::notify::{ensure_tray, is_experimental, popups_enabled, toggle_label};
 use settings::Settings;
 
@@ -976,13 +976,6 @@ fn note(p: Palette, text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-fn preset_of(s: &Snapshot, p: Profile) -> Preset {
-    match p {
-        Profile::Stock(m) => s.stock[m as usize],
-        Profile::Custom => s.custom,
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputId {
     Hex,
@@ -1236,11 +1229,13 @@ impl Ui {
     fn profile_dropdown(&self, cx: &mut Context<Self>) -> Div {
         const W: f32 = 400.;
         const NAME_W: f32 = 96.;
-        const CPU_W: f32 = 132.;
+        const CPU_W: f32 = 150.;
         let p = self.p();
         let s = &self.snap;
         let open = self.dropdown_open;
-        let current = s.profile.map_or("Unknown", Profile::name);
+        let current = s
+            .profile
+            .map_or_else(|| "Unknown".to_string(), |p| s.label(p));
 
         let dot = move |on: bool| {
             div()
@@ -1298,7 +1293,7 @@ impl Ui {
                 .text_color(rgb(p.muted))
                 .child(div().w(px(8.)))
                 .child(div().w(px(NAME_W)).child("PROFILE"))
-                .child(div().w(px(CPU_W)).child("CPU PL1 / PL2"))
+                .child(div().w(px(CPU_W)).child("CPU PL1 / PL2 / PL4"))
                 .child(div().child("GPU cTGP"));
             let mut list = div()
                 .absolute()
@@ -1320,8 +1315,12 @@ impl Ui {
                     cx.notify();
                 }))
                 .child(header);
-            for (i, m) in PROFILES.into_iter().enumerate() {
-                let pr = preset_of(s, m);
+            let entries: Vec<Profile> = STOCK_PROFILES
+                .into_iter()
+                .chain((0..s.customs.len()).map(Profile::Custom))
+                .collect();
+            for (i, m) in entries.into_iter().enumerate() {
+                let pr = s.preset(m);
                 let active = s.profile == Some(m);
                 list = list.child(
                     div()
@@ -1349,12 +1348,12 @@ impl Ui {
                             ui.act(cx, move |hw| hw.set_profile(m));
                         }))
                         .child(dot(active))
-                        .child(div().w(px(NAME_W)).child(m.name()))
+                        .child(div().w(px(NAME_W)).truncate().child(s.label(m)))
                         .child(
                             div()
                                 .w(px(CPU_W))
                                 .when(!active, |d| d.text_color(rgb(p.muted)))
-                                .child(format!("{} / {} W", pr.pl1, pr.pl2)),
+                                .child(format!("{} / {} / {} W", pr.pl1, pr.pl2, pr.pl4)),
                         )
                         .child(
                             div()
@@ -1363,22 +1362,45 @@ impl Ui {
                         ),
                 );
             }
+            // a copy of what is running now, to edit
+            list = list.child(
+                div()
+                    .id("profile-new")
+                    .h(px(30.))
+                    .px_2()
+                    .mt_1()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .border_t_1()
+                    .border_color(rgb(p.border))
+                    .text_color(rgb(p.accent))
+                    .hover(move |st| st.bg(rgb(p.hover)))
+                    .on_click(cx.listener(|ui, _, _, cx| {
+                        ui.dropdown_open = false;
+                        ui.preview = None;
+                        ui.act(cx, |hw| hw.new_profile());
+                    }))
+                    .child("+ New profile"),
+            );
             // `deferred` paints the list after everything else, so later sections cannot cover it.
             wrap = wrap.child(deferred(list).with_priority(1));
         }
         wrap
     }
 
-    /// A watt slider (5 W steps) for one Custom-preset value.
+    /// A watt slider (5 W steps) for one value of the profile at `idx`.
     fn custom_slider(
         &self,
         cx: &mut Context<Self>,
         id: &'static str,
+        idx: usize,
         field: Field,
         value: u8,
-        lo: u8,
-        hi: u8,
+        range: std::ops::RangeInclusive<u8>,
     ) -> Stateful<Div> {
+        let (lo, hi) = (*range.start(), *range.end());
         let steps: Vec<u8> = (lo..=hi).step_by(5).collect();
         let sel = steps
             .iter()
@@ -1397,7 +1419,7 @@ impl Ui {
             },
             move |i| {
                 let v = steps[i];
-                Box::new(move |hw| hw.set_custom(field, v))
+                Box::new(move |hw| hw.set_custom(idx, field, v))
             },
         )
     }
@@ -1411,24 +1433,37 @@ impl Ui {
         let mut changes = section(
             p,
             &match target {
-                Some(m) if Some(m) != s.profile => format!("Switch to {}", m.name()),
-                Some(m) => m.name().to_string(),
+                Some(m) if Some(m) != s.profile => format!("Switch to {}", s.label(m)),
+                Some(m) => s.label(m),
                 None => "Current limits".to_string(),
             },
         );
         match target {
             Some(m) => {
-                let pr = preset_of(s, m);
+                let pr = s.preset(m);
                 changes = changes
-                    .child(change(p, "CPU PL1", s.pl.map(|v| v.0), pr.pl1, ""))
-                    .child(change(p, "CPU PL2", s.pl.map(|v| v.1), pr.pl2, ""))
+                    .child(change(
+                        p,
+                        "CPU PL1 (Sustained Power)",
+                        s.pl.map(|v| v.0),
+                        pr.pl1,
+                        "",
+                    ))
+                    .child(change(
+                        p,
+                        "CPU PL2 (Boost Power)",
+                        s.pl.map(|v| v.1),
+                        pr.pl2,
+                        "",
+                    ))
+                    .child(change(p, "CPU PL4 (Peak Power)", s.pl4, pr.pl4, ""))
                     .child(change(p, "GPU cTGP", s.ctgp, pr.ctgp, "+"));
                 match m {
                     Profile::Stock(OperatingMode::Turbo) => {
-                        changes = changes.child(note(p, "The stock app's values for this machine. Runs hot under load; the GPU part needs the NVIDIA driver."));
+                        changes = changes.child(note(p, "The highest stock profile (the EC's own defaults). Runs hot under load."));
                     }
-                    Profile::Custom => {
-                        changes = changes.child(note(p, "Your own preset, edited below."))
+                    Profile::Custom(_) => {
+                        changes = changes.child(note(p, "One of your own profiles, edited below."))
                     }
                     Profile::Stock(_) => {}
                 }
@@ -1440,21 +1475,54 @@ impl Ui {
             }
         }
 
-        // The only editable preset; the stock three are fixed.
-        let c = s.custom;
-        let custom = section(p, "Custom performance profile preset")
-            .child(
-                div().flex().gap_2().child(
-                    button(p, "custom-default", "Default preset", false).on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.reset_custom()))),
-                ),
-            )
-            .child(row(p, "CPU PL1", format!("{} W", c.pl1)))
-            .child(self.custom_slider(cx, "custom-pl1", Field::Pl1, c.pl1, 5, control::PL_CEILING_W))
-            .child(row(p, "CPU PL2", format!("{} W", c.pl2)))
-            .child(self.custom_slider(cx, "custom-pl2", Field::Pl2, c.pl2, 5, control::PL_CEILING_W))
-            .child(row(p, "GPU cTGP", format!("+{} W", c.ctgp)))
-            .child(self.custom_slider(cx, "custom-ctgp", Field::Ctgp, c.ctgp, 0, control::CTGP_CEILING_W))
-            .child(note(p, format!("Balanced, Enthusiast and Overboost are fixed. Edit this one, then pick Custom. Capped at {} W (cTGP {} W).", control::PL_CEILING_W, control::CTGP_CEILING_W)));
+        // Your own profiles are edited while one of them is running; the stock three are fixed.
+        let custom = match s.profile {
+            Some(Profile::Custom(i)) if i < s.customs.len() => {
+                let c = &s.customs[i];
+                let (pr, base) = (c.preset, Profile::Stock(c.base).name());
+                section(p, &format!("{} (from {base})", c.name))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                button(p, "custom-reset", format!("Reset to {base}"), false)
+                                    .on_click(cx.listener(move |ui, _, _, cx| {
+                                        ui.act(cx, move |hw| hw.reset_custom(i))
+                                    })),
+                            )
+                            .child(button(p, "custom-delete", "Delete", false).on_click(
+                                cx.listener(move |ui, _, _, cx| {
+                                    ui.act(cx, move |hw| hw.delete_profile(i))
+                                }),
+                            )),
+                    )
+                    .child(row(p, "CPU PL1 (Sustained Power)", format!("{} W", pr.pl1)))
+                    .child(self.custom_slider(cx, "custom-pl1", i, Field::Pl1, pr.pl1, 5..=control::PL_CEILING_W))
+                    .child(row(p, "CPU PL2 (Boost Power)", format!("{} W", pr.pl2)))
+                    .child(self.custom_slider(cx, "custom-pl2", i, Field::Pl2, pr.pl2, 5..=control::PL_CEILING_W))
+                    .child(row(p, "CPU PL4 (Peak Power)", format!("{} W", pr.pl4)))
+                    .child(self.custom_slider(cx, "custom-pl4", i, Field::Pl4, pr.pl4, 5..=control::PL4_CEILING_W))
+                    .child(row(p, "GPU cTGP", format!("+{} W", pr.ctgp)))
+                    .child(self.custom_slider(cx, "custom-ctgp", i, Field::Ctgp, pr.ctgp, 0..=control::CTGP_CEILING_W))
+                    .child(note(p, format!("Changes apply at once. PL1 never above PL2, PL2 never above PL4. Capped at {} W (PL4 {} W, cTGP {} W).", control::PL_CEILING_W, control::PL4_CEILING_W, control::CTGP_CEILING_W)))
+            }
+            running => section(p, "Your own profiles")
+                .child(
+                    div().flex().gap_2().child(
+                        button(
+                            p,
+                            "custom-new",
+                            running.map_or("New profile".to_string(), |r| {
+                                format!("New profile from {}", s.label(r))
+                            }),
+                            false,
+                        )
+                        .on_click(cx.listener(|ui, _, _, cx| ui.act(cx, |hw| hw.new_profile()))),
+                    ),
+                )
+                .child(note(p, "Office, Gaming and Turbo are fixed. A new profile starts as a copy of the one running now; you edit its limits here.")),
+        };
 
         let mut page = div().flex().flex_col().gap_3();
         if let Some(e) = &s.ec_error {
@@ -1469,7 +1537,10 @@ impl Ui {
         }
         let profile = section(p, "Profile")
             .child(self.profile_dropdown(cx))
-            .child(note(p, "The mode button cycles Balanced → Enthusiast → Overboost; lights 0 / 1 / 2 (Custom shows 1)."));
+            .child(note(
+            p,
+            "The mode button cycles Office → Gaming → Turbo; lights 0 / 1 / 2 (your own profiles show 1).",
+        ));
         page.child(profile)
             .child(changes)
             .child(custom)

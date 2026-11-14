@@ -4,22 +4,22 @@
 
 use ripple_core::modes::OperatingMode;
 use ripple_core::regs::addr;
-use ripple_hw::control::{self, Config, FanCurves, Hsv, Preset, Profile};
+use ripple_hw::control::{self, Config, CustomProfile, FanCurves, Hsv, Preset, Profile};
 use ripple_hw::linux::{self, SysfsEc};
 use ripple_hw::EcAccess;
 
-/// Dropdown order: the three stock profiles, then the user's own.
-pub const PROFILES: [Profile; 4] = [
+/// Dropdown order: the three stock profiles, then the user's own (`Snapshot::customs`).
+pub const STOCK_PROFILES: [Profile; 3] = [
     Profile::Stock(OperatingMode::Office),
     Profile::Stock(OperatingMode::Gaming),
     Profile::Stock(OperatingMode::Turbo),
-    Profile::Custom,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Pl1,
     Pl2,
+    Pl4,
     Ctgp,
 }
 
@@ -36,10 +36,11 @@ pub struct Snapshot {
     pub profile: Option<Profile>,
     /// Current PL1/PL2 and cTGP offset as the hardware reports them.
     pub pl: Option<(u8, u8)>,
+    pub pl4: Option<u8>,
     pub ctgp: Option<u8>,
-    /// Stock presets (read-only, Office/Gaming/Turbo order) and the user's Custom one.
+    /// Stock presets (read-only, Office/Gaming/Turbo order) and the user's own profiles.
     pub stock: [Preset; 3],
-    pub custom: Preset,
+    pub customs: Vec<CustomProfile>,
     /// Fan boost is on (not the custom profile, which shares the EC bit).
     pub boosted: bool,
     /// The custom fan profile: curves and whether the daemon applies them.
@@ -64,11 +65,30 @@ pub struct Snapshot {
     pub event: String,
 }
 
+impl Snapshot {
+    /// A profile's name as shown: the stock modes by name, the user's by their own.
+    pub fn label(&self, p: Profile) -> String {
+        match p {
+            Profile::Custom(i) => self
+                .customs
+                .get(i)
+                .map_or_else(|| "Custom".to_string(), |c| c.name.clone()),
+            _ => p.name().to_string(),
+        }
+    }
+
+    /// The limits a profile sets.
+    pub fn preset(&self, p: Profile) -> Preset {
+        control::preset_for(&self.stock, &self.customs, p)
+    }
+}
+
 impl Default for Snapshot {
     fn default() -> Self {
         let p = Preset {
             pl1: 0,
             pl2: 0,
+            pl4: 0,
             ctgp: 0,
         };
         Self {
@@ -79,9 +99,10 @@ impl Default for Snapshot {
             fans: vec![],
             profile: None,
             pl: None,
+            pl4: None,
             ctgp: None,
             stock: [p; 3],
-            custom: p,
+            customs: vec![],
             boosted: false,
             fan: FanCurves::default(),
             auto_boost: None,
@@ -140,7 +161,7 @@ impl Hw {
         // find out which profile the EC is running (right after boot only the lights know), write its
         // limits and put the button's lights on it
         if let Some(ec) = ec.as_deref_mut() {
-            let _ = control::adopt(ec, sysfs.as_ref(), &stock, &cfg.custom);
+            let _ = control::adopt(ec, sysfs.as_ref(), &stock, &cfg.profiles);
         }
         Self {
             ec,
@@ -164,6 +185,9 @@ impl Hw {
     }
 
     pub fn snapshot(&mut self) -> Snapshot {
+        // the CLI edits the profiles and the fan profile too: always start from what is saved
+        let saved = Config::load();
+        self.cfg.profiles = saved.profiles;
         let mut s = Snapshot {
             model: self.model.clone(),
             backend: self
@@ -172,26 +196,25 @@ impl Hw {
                 .map_or("none".into(), |e| e.name().to_string()),
             ec_error: self.ec_error.clone(),
             stock: self.stock,
-            custom: self.cfg.custom,
+            customs: self.cfg.profiles.clone(),
             auto_boost: self.cfg.auto_boost_above,
             button: self.button,
             service: self.service,
             event: self.event.clone(),
             ..Default::default()
         };
-        let (stock, custom) = (self.stock, self.cfg.custom);
-        // the CLI edits the fan profile too: always start from what is saved
-        let saved = Config::load();
+        let (stock, customs) = (self.stock, self.cfg.profiles.clone());
         self.cfg.fan = saved.fan;
         self.cfg.touchpad_on = saved.touchpad_on; // chosen elsewhere too (CLI, daemon): never write back a stale one
         s.fan = self.cfg.fan.clone();
         let mut manual = None; // what the fans are told to run at, while the EC follows the duty registers
         if let Some(ec) = self.ec.as_deref_mut() {
-            s.profile = control::current(ec, &stock, &custom).ok().flatten();
+            s.profile = control::running(ec, &stock, &customs).ok().flatten();
             s.pl = ec
                 .read(addr::PL1_SETTING)
                 .ok()
                 .zip(ec.read(addr::PL2_SETTING).ok());
+            s.pl4 = ec.read(addr::PL4_SETTING).ok();
             let fan_byte = ec.read(addr::MAFAN_CONTROL_BYTE).ok();
             s.boosted = fan_byte.is_some_and(control::is_boosted) && !self.cfg.fan.enabled;
             manual = fan_byte.and_then(|b| control::manual_duties(ec, b));
@@ -268,9 +291,18 @@ impl Hw {
     }
 
     fn preset(&self, p: Profile) -> Preset {
+        control::preset_for(&self.stock, &self.cfg.profiles, p)
+    }
+
+    /// A profile's name as shown in messages.
+    fn label(&self, p: Profile) -> String {
         match p {
-            Profile::Stock(m) => self.stock[m as usize],
-            Profile::Custom => self.cfg.custom,
+            Profile::Custom(i) => self
+                .cfg
+                .profiles
+                .get(i)
+                .map_or_else(|| "custom".to_string(), |c| c.name.clone()),
+            _ => p.name().to_lowercase(),
         }
     }
 
@@ -283,20 +315,24 @@ impl Hw {
         });
         self.sysfs = sysfs;
         r?;
+        // limits alone cannot tell a profile from the stock one it was copied from
+        control::remember_profile(&self.cfg.profiles, p);
         Ok(format!(
-            "{}: PL1 {} W / PL2 {} W / GPU cTGP +{} W",
-            p.name().to_lowercase(),
+            "{}: PL1 {} W / PL2 {} W / PL4 {} W / GPU cTGP +{} W",
+            self.label(p),
             pr.pl1,
             pr.pl2,
+            pr.pl4,
             pr.ctgp
         ))
     }
 
     /// One press of the hardware mode button.
     pub fn cycle_profile(&mut self) -> String {
-        let (stock, custom) = (self.stock, self.cfg.custom);
+        self.cfg.profiles = Config::load().profiles;
+        let (stock, customs) = (self.stock, self.cfg.profiles.clone());
         let cur = match self.ec() {
-            Ok(ec) => control::current(ec, &stock, &custom).ok().flatten(),
+            Ok(ec) => control::running(ec, &stock, &customs).ok().flatten(),
             Err(e) => return format!("mode button: {e}"),
         };
         match self.set_profile(Profile::after_button(cur)) {
@@ -305,49 +341,110 @@ impl Hw {
         }
     }
 
-    /// Set one value of the Custom preset (the stock ones are read-only). PL1 <= PL2 is kept by
-    /// moving the other limit along. Validated, saved, and re-applied if Custom is active.
-    pub fn set_custom(&mut self, field: Field, value: u8) -> Result<String, String> {
-        let mut p = self.cfg.custom;
+    /// The profiles as last saved (the CLI edits them too), and the one at `idx` in them.
+    fn profile_at(&mut self, idx: usize) -> Result<CustomProfile, String> {
+        self.cfg.profiles = Config::load().profiles;
+        self.cfg
+            .profiles
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| "that profile is gone".to_string())
+    }
+
+    /// Set one value of one of your own profiles (the stock ones are read-only). PL1 <= PL2 <= PL4 is
+    /// kept by moving the other limits along. Validated, saved, and re-applied if it is running.
+    pub fn set_custom(&mut self, idx: usize, field: Field, value: u8) -> Result<String, String> {
+        let mut p = self.profile_at(idx)?.preset;
         match field {
             Field::Pl1 => {
                 p.pl1 = value;
                 p.pl2 = p.pl2.max(value);
+                p.pl4 = p.pl4.max(p.pl2);
             }
             Field::Pl2 => {
                 p.pl2 = value;
                 p.pl1 = p.pl1.min(value);
+                p.pl4 = p.pl4.max(value);
+            }
+            Field::Pl4 => {
+                p.pl4 = value;
+                p.pl2 = p.pl2.min(value);
+                p.pl1 = p.pl1.min(p.pl2);
             }
             Field::Ctgp => p.ctgp = value,
         }
-        self.store_custom(p)
+        self.store_custom(idx, p)
     }
 
-    /// Back to the default custom performance profile preset.
-    pub fn reset_custom(&mut self) -> Result<String, String> {
-        self.store_custom(control::default_custom())
+    /// Back to the stock mode the profile started from.
+    pub fn reset_custom(&mut self, idx: usize) -> Result<String, String> {
+        let base = self.profile_at(idx)?.base;
+        self.store_custom(idx, self.stock[base as usize])
     }
 
-    fn store_custom(&mut self, p: Preset) -> Result<String, String> {
+    fn store_custom(&mut self, idx: usize, p: Preset) -> Result<String, String> {
         p.validate()?;
-        if p == self.cfg.custom {
-            return Ok("custom preset unchanged".into());
+        let old = self.profile_at(idx)?.preset;
+        if p == old {
+            return Ok("profile unchanged".into());
         }
-        let (stock, old) = (self.stock, self.cfg.custom);
-        let was_active = self
-            .ec()
-            .ok()
-            .and_then(|ec| control::current(ec, &stock, &old).ok().flatten())
-            == Some(Profile::Custom);
-        self.cfg.custom = p;
+        let was_running = self.is_running(Profile::Custom(idx));
+        self.cfg.profiles[idx].preset = p;
         self.cfg.save().map_err(|e| e.to_string())?;
-        if was_active {
-            return self.set_profile(Profile::Custom);
+        if was_running {
+            return self.set_profile(Profile::Custom(idx));
         }
         Ok(format!(
-            "custom preset: PL1 {} W / PL2 {} W / cTGP +{} W",
-            p.pl1, p.pl2, p.ctgp
+            "{}: PL1 {} W / PL2 {} W / PL4 {} W / cTGP +{} W",
+            self.cfg.profiles[idx].name, p.pl1, p.pl2, p.pl4, p.ctgp
         ))
+    }
+
+    fn is_running(&mut self, p: Profile) -> bool {
+        let (stock, customs) = (self.stock, self.cfg.profiles.clone());
+        self.ec()
+            .ok()
+            .and_then(|ec| control::running(ec, &stock, &customs).ok().flatten())
+            == Some(p)
+    }
+
+    /// Make "Profile N" as a copy of what is running now (the stock mode it started from is its base)
+    /// and switch to it, so it is the one you edit.
+    pub fn new_profile(&mut self) -> Result<String, String> {
+        self.cfg.profiles = Config::load().profiles;
+        let (stock, customs) = (self.stock, self.cfg.profiles.clone());
+        let gaming = (OperatingMode::Gaming, stock[OperatingMode::Gaming as usize]);
+        let running = self
+            .ec()
+            .ok()
+            .and_then(|ec| control::running(ec, &stock, &customs).ok().flatten());
+        let (base, preset) = match running {
+            Some(Profile::Stock(m)) => (m, stock[m as usize]),
+            Some(Profile::Custom(i)) => customs.get(i).map_or(gaming, |c| (c.base, c.preset)),
+            None => gaming,
+        };
+        let name = control::next_profile_name(&customs);
+        self.cfg.profiles.push(CustomProfile { name, base, preset });
+        self.cfg.save().map_err(|e| e.to_string())?;
+        self.set_profile(Profile::Custom(self.cfg.profiles.len() - 1))
+    }
+
+    /// Delete a profile; if it was running, go back to the stock mode it started from.
+    pub fn delete_profile(&mut self, idx: usize) -> Result<String, String> {
+        let gone = self.profile_at(idx)?;
+        let was_running = self.is_running(Profile::Custom(idx));
+        self.cfg.profiles.remove(idx);
+        self.cfg.save().map_err(|e| e.to_string())?;
+        if was_running {
+            self.set_profile(Profile::Stock(gone.base))?;
+        } else {
+            // indexes after it moved up by one: the remembered one has to follow
+            let customs = self.cfg.profiles.clone();
+            if let Some(i) = control::remembered_profile(&customs) {
+                control::remember_profile(&customs, Profile::Custom(i));
+            }
+        }
+        Ok(format!("deleted {}", gone.name))
     }
 
     /// Auto (firmware), the custom fan profile (the daemon applies it) or boost.

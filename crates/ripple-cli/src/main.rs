@@ -79,12 +79,12 @@ pub enum Command {
         #[arg(long, default_value_t = 1.0)]
         interval: f64,
     },
-    /// Performance profile (Balanced/Enthusiast/Overboost): show, set, cycle
+    /// Performance profile (Office/Gaming/Turbo): show, set, cycle
     Mode {
         #[command(subcommand)]
         cmd: ModeCmd,
     },
-    /// Follow the hardware mode button: each press cycles Balanced → Enthusiast → Overboost and
+    /// Follow the hardware mode button: each press cycles Office → Gaming → Turbo and
     /// applies it (what the stock Windows service does). Runs until stopped.
     Watch,
     /// Fan control: curves, boost, levels
@@ -166,40 +166,50 @@ pub enum EcCmd {
 pub enum ModeCmd {
     /// Show current mode
     Get,
-    /// Set the performance mode
+    /// Set the performance mode: office, gaming, turbo, or the name of one of your own profiles
     Set {
-        #[arg(value_enum)]
-        mode: ModeChoice,
+        /// `office`, `gaming`, `turbo` (or balanced / enthusiast / overboost), or a profile name
+        mode: String,
     },
     /// Switch to the next mode, like one press of the hardware button
     Next,
-    /// Save your custom performance profile preset (the stock ones are read-only): `rcc mode custom 45 50 --ctgp 5`
+    /// List the stock modes and your own profiles with their limits
+    List,
+    /// Make or change one of your own profiles (the stock ones are read-only): `rcc mode custom "Profile 1" 45 50 --pl4 120`
     Custom {
+        /// The profile's name; a name that does not exist yet makes a new profile
+        name: String,
         /// PL1 in watts
         pl1: u8,
         /// PL2 in watts
         pl2: u8,
+        /// Peak power PL4 in watts (PL2..=145)
+        #[arg(long, default_value_t = 145)]
+        pl4: u8,
         /// GPU cTGP offset in watts
         #[arg(long, default_value_t = 0)]
         ctgp: u8,
+        /// The stock mode a new profile starts from, what `reset-custom` goes back to
+        #[arg(long, value_enum, default_value = "gaming")]
+        base: ModeChoice,
     },
-    /// Put the custom performance profile preset back to its default
-    ResetCustom,
+    /// Put one of your profiles back to the stock mode it started from
+    ResetCustom { name: String },
+    /// Delete one of your profiles
+    Delete { name: String },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 pub enum ModeChoice {
-    /// 0 lights: lowest power (EC default PL, 35 W here; was "office")
-    #[value(alias = "office")]
-    Balanced,
-    /// 1 light: EC default PL, 55 W here (was "gaming")
-    #[value(alias = "gaming")]
-    Enthusiast,
-    /// 2 lights: 80 W + GPU cTGP +20 W, the stock app's values for this machine (was "turbo")
-    #[value(alias = "turbo")]
-    Overboost,
-    /// Your own preset (see `rcc mode custom`); not reachable with the hardware button
-    Custom,
+    /// 0 lights: lowest power (EC default PL, 35 W here; the Windows app labels it "Balanced")
+    #[value(alias = "balanced")]
+    Office,
+    /// 1 light: EC default PL, 55 W here (the Windows app labels it "Enthusiast")
+    #[value(alias = "enthusiast")]
+    Gaming,
+    /// 2 lights: EC default PL, 65 W here (the Windows app labels it "Overboost")
+    #[value(alias = "overboost")]
+    Turbo,
 }
 
 #[derive(Subcommand)]
@@ -279,7 +289,7 @@ pub enum CurveCmd {
 pub enum PowerCmd {
     /// Show current PL1/PL2/TCC (EC read)
     Get,
-    /// Set PL1 in watts (5..=80, the stock Overboost value for this machine)
+    /// Set PL1 in watts (5..=80, the highest stock value for this machine)
     Pl1 { watts: u16 },
     /// Set PL2 in watts (5..=80)
     Pl2 { watts: u16 },
