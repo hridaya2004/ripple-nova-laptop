@@ -1787,15 +1787,14 @@ impl Ui {
     /// Font select: same popover pattern as the profile dropdown. Every installed family is listed
     /// (virtualized, so hundreds of entries stay fast) and drawn in its own font. The first entry
     /// is the default, the system monospace font.
-    /// The font field with its typeahead underneath while it is being edited.
+    /// The font field. While it is being edited the typeahead floats over what is below it and takes no
+    /// layout space (`deferred`, like the profile dropdown): the page does not move.
     fn font_field(&self, cx: &mut Context<Self>) -> Div {
         const W: f32 = 400.;
         let p = self.p();
         let default_label = format!("System monospace ({})", self.system_font);
-        let mut wrap = div()
-            .flex()
-            .flex_col()
-            .gap_1()
+        let wrap = div()
+            .relative()
             .w(px(W))
             // clicking anywhere else ends the editing; clicks on the rows below are inside
             .on_mouse_down_out(cx.listener(|ui, _, window, cx| {
@@ -1811,13 +1810,20 @@ impl Ui {
         let (rows, total) = self.font_rows();
         let sel = self.font_sel.min(rows.len().saturating_sub(1));
         let mut list = div()
+            .absolute()
+            .top(px(36.))
+            .left_0()
+            .w(px(W))
             .flex()
             .flex_col()
             .p_1()
             .rounded_md()
             .border_1()
             .border_color(rgb(p.border))
-            .bg(rgb(p.popup));
+            .bg(rgb(p.popup))
+            .shadow_lg()
+            // the popup covers the sections below: their controls must not get its clicks
+            .occlude();
         for (i, row) in rows.iter().enumerate() {
             let (label, family): (String, SharedString) = match row {
                 None => (default_label.clone(), self.system_font.clone()),
@@ -1860,8 +1866,10 @@ impl Ui {
         } else {
             format!("{total} families installed")
         };
-        wrap = wrap.child(list).child(note(p, count));
-        wrap
+        // the count sits inside the popup: nothing outside it moves
+        list = list.child(note(p, count).px_2().pt_1());
+        // `deferred` paints the popup after everything else, so the sections below cannot cover it
+        wrap.child(deferred(list).with_priority(1))
     }
 
     fn settings_tab(&self, cx: &mut Context<Self>) -> AnyElement {
