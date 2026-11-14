@@ -3,8 +3,7 @@
 use super::*;
 
 /// Does the EC report a lightbar? (`SupportByteOneFlag` bit 6, the stock app's
-/// `LightbarSupport`.) This machine: no, even though the force-loaded kernel driver
-/// still exposes a lightbar LED and the rainbow/breathing attributes.
+/// `LightbarSupport`.) This machine: no.
 pub fn has_lightbar(ec: &mut dyn EcAccess) -> bool {
     ec.read(addr::SUPPORT_BYTE1).is_ok_and(|b| b & 0x40 != 0)
 }

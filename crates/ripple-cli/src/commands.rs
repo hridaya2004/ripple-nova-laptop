@@ -225,15 +225,17 @@ fn doctor(cli: &Cli) -> CmdResult {
         );
         if module_loaded("uniwill-laptop") {
             fixes.push(
-                "  loaded, but no hwmon device → DMI whitelist may not cover this machine:".into(),
+                "  loaded, but no hwmon device → this copy of the driver may not list this machine:".into(),
             );
-            fixes.push("  try:     sudo modprobe uniwill-laptop force=1    # testing only".into());
+            fixes.push(
+                "  try:     ./install.sh    # builds the driver with the Ripple Nova entry".into(),
+            );
         } else if let Some(p) = module_path("uniwill-laptop") {
             fixes.push(format!(
                 "  present ({p}) → run: sudo modprobe uniwill-laptop"
             ));
             fixes.push(
-                "  no hwmon after load? → sudo modprobe uniwill-laptop force=1 (DMI whitelist)"
+                "  no hwmon after load? → ./install.sh (the kernel's own copy may not list this machine)"
                     .into(),
             );
         } else if kernel_ver.is_some_and(|v| v < (6, 19)) {

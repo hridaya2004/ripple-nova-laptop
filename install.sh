@@ -139,7 +139,8 @@ $SUDO install -Dm644 dist/ripple-nova.desktop "$DESTDIR$PREFIX/share/application
 $SUDO install -Dm644 dist/ripple-nova.svg "$DESTDIR$PREFIX/share/icons/hicolor/scalable/apps/ripple-nova.svg"
 $SUDO install -Dm644 "$tmp/unit" "$DESTDIR/etc/systemd/system/$UNIT"
 $SUDO install -Dm644 dist/modules-load.conf "$DESTDIR/etc/modules-load.d/ripple-nova.conf"
-$SUDO install -Dm644 dist/modprobe.conf "$DESTDIR/etc/modprobe.d/ripple-nova.conf"
+# Older versions forced the module here (force=1); that would now override the driver's own Ripple Nova entry.
+$SUDO rm -f "$DESTDIR/etc/modprobe.d/ripple-nova.conf"
 $SUDO install -Dm644 dist/61-uniwill-touchpad.hwdb "$DESTDIR/etc/udev/hwdb.d/61-uniwill-touchpad.hwdb"
 if [ -n "$KO" ]; then
     # the same as: mkdir -p /usr/lib/modules/$(uname -r)/updates && cp uniwill-laptop.ko there && depmod -a

@@ -146,8 +146,7 @@ git clone <this repository> && cd ripple-nova
 
 It builds the Rust workspace (release), builds the `uniwill-laptop` kernel module for the running kernel, and
 installs: `rcc`, `rcc-gui`, `rcc-tray`, `ripple-nova` (to `/usr/local/bin`), the menu entry and icon,
-`ripple-nova.service` (enabled and started), a module-load list (`acpi_call`, `uniwill-laptop`), a modprobe option
-(`force=1`, see below), a udev hwdb entry for the touchpad's corner gesture (see *Touchpad double tap* below) and the sudoers
+`ripple-nova.service` (enabled and started), a module-load entry (`acpi_call`), a udev hwdb entry for the touchpad's corner gesture (see *Touchpad double tap* below) and the sudoers
 rule. It does **not** turn on starting at login: that is *Open at login* in
 Settings (and an install removes the always-on tray login entry that older versions put in `/etc/xdg/autostart`).
 Options:
@@ -188,8 +187,6 @@ The sensors, the keyboard and lightbar LEDs, the battery charge types and the pl
 
 - `updates/` takes precedence over the kernel's own copy of the driver.
 - **Rebuild it after every kernel update**: rerun `./install.sh` (there is no DKMS integration).
-- `force=1` (in `/etc/modprobe.d/ripple-nova.conf`, and in the service) is needed because this laptop's DMI is the
-  generic "Standard", which is not on the driver's list.
 - If a different build is already loaded, the installer says so; reboot, or
   `sudo systemctl stop ripple-nova && sudo modprobe -r uniwill_laptop && sudo modprobe uniwill_laptop && sudo systemctl start ripple-nova`.
 - **Update the copy**:

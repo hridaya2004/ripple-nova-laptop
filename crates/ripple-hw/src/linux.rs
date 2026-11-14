@@ -692,7 +692,7 @@ impl SysfsEc {
             (Some(hwmon), platform) => Ok(Self { hwmon, platform }),
             _ => Err(HwError::Unavailable(
                 "uniwill-laptop not bound — run: sudo modprobe uniwill-laptop \
-                 (DMI whitelist: force=1) — needs Linux >= 6.19"
+                 — needs Linux >= 6.19"
                     .into(),
             )),
         }
