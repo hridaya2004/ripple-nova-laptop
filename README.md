@@ -81,7 +81,7 @@ on a real laptop.
 | Lightbar | this laptop has none (the kernel exposes one anyway; the controls are hidden) |
 | Display refresh rate (needs kscreen-doctor, xrandr or wlr-randr), display colour profiles, dGPU power / mux mode | not started. dGPU power needs a verified ACPI `_OFF`/`_ON` pair first: a wrong `_OFF` is risky, so it is not wired |
 | CPU thermal offset (TCC, EC 2008 holds the Gaming default, 2009 and 2010 the others) | read-only knowledge; writing it is not done. The stock service only writes it in a variant of this EC (0x786) that this model may not have |
-| GPU Dynamic Boost; checking the cTGP effect | cTGP is written but unobservable under nouveau; needs the NVIDIA driver |
+| The OEM's "Graphics Card" options: GPU core and memory clock offsets, GPU temperature target, the Dynamic Boost switch and value, "Unlock Configurable TGP" | not started. The clock offsets and the temperature target go through NVIDIA's NVML library, so they need [the NVIDIA driver](#the-nvidia-driver) (to be shown only when it is installed). cTGP and Dynamic Boost are EC registers (0x743 bits, 0x744, 0x746) that the kernel driver already sets up; only the NVIDIA driver applies them |
 | OSD, per-app profiles, process control, keyboard remap, gaming monitor, liquid cooling (Oasis) | OEM features, not planned yet |
 | Windows backend, MQTT interop with the OEM UI | out of scope for now |
 
@@ -102,7 +102,7 @@ sudo pacman -S --needed base-devel git linux-headers acpi_call libnotify polkit 
 rustup default stable                      # Rust 1.89 or newer
 # window (GPUI) runtime libraries, usually present with a desktop:
 sudo pacman -S --needed wayland libxkbcommon vulkan-icd-loader fontconfig freetype2
-# plus the Vulkan driver for your GPU: vulkan-intel, vulkan-radeon or vulkan-nouveau
+# plus the Vulkan driver for your GPU: vulkan-intel, vulkan-radeon, vulkan-nouveau (or nvidia-utils, see below)
 # GNOME only, for the tray icon:
 sudo pacman -S --needed gnome-shell-extension-appindicator
 ```
@@ -173,6 +173,55 @@ The sensors, the keyboard and lightbar LEDs, the battery charge types and the pl
 - **Update the copy**:
   `git subtree pull --prefix=vendor/uniwill-laptop https://github.com/Wer-Wolf/uniwill-laptop master --squash`.
 - **License**: the driver is GPL-2.0 (`vendor/uniwill-laptop/LICENSE`); the rest of the project is [MIT or Apache-2.0](#license).
+
+## The NVIDIA driver
+
+Only needed for the GPU power settings. The EC holds the GPU's configurable TGP offset (cTGP) and the Dynamic Boost
+values; the kernel driver and `rcc` write them whatever GPU driver you run. The GPU obeys them through NVIDIA's
+driver (as far as we can tell it finds them through the `NVDA0820` firmware device; the kernel driver's documentation
+calls cTGP an offset "on top of the base TGP" and does not say who applies it). Nouveau does not read them and registers no GPU power or temperature sensor, so
+under nouveau the cTGP value is stored and you cannot see any effect. Nothing else in this project needs the NVIDIA
+driver; the window, the profiles, the fans and the keyboard work the same with nouveau.
+
+Arch, with the stock `linux` kernel (Turing and newer GPUs; for another kernel use `nvidia-open-dkms`):
+
+```sh
+sudo pacman -S --needed nvidia-open nvidia-utils nvidia-prime
+sudo systemctl enable nvidia-powerd.service     # Dynamic Boost; it needs Ampere or newer and firmware support
+sudo reboot
+```
+
+- `nvidia-utils` blacklists nouveau (`/usr/lib/modprobe.d/nvidia-utils.conf`). With the `kms` mkinitcpio hook the
+  boot image has to be rebuilt to carry that blacklist; the install does it by itself (the modules land in
+  `extramodules`). Check: `sudo lsinitcpio /boot/EFI/Linux/arch-linux.efi | grep nvidia-utils.conf`.
+- **Secure Boot with a unified kernel image signed by `sbctl`**: sbctl's mkinitcpio hook signs the rebuilt image
+  (`sudo sbctl verify` lists nothing unsigned). Before installing, keep a signed copy of the working image: systemd-boot
+  then offers it as a second entry (press a key in the 20 s menu) if the new one does not come up:
+  `sudo cp -p /boot/EFI/Linux/arch-linux.efi /boot/EFI/Linux/arch-linux-pre-nvidia.efi`.
+- An external monitor on the laptop's HDMI/DisplayPort is wired to the NVIDIA GPU: it is the first thing that goes
+  dark if the driver does not load. The internal panel is on the Intel GPU.
+- `modeset` is on by default in the packaged driver (`modinfo -p nvidia_drm`).
+
+After the reboot:
+
+```sh
+lsmod | grep -E '^nvidia|^nouveau'               # nvidia modules, no nouveau
+nvidia-smi                                       # the GPU and the driver version
+nvidia-smi -q -d POWER                           # the power limits: do they move with cTGP?
+cat /proc/driver/nvidia/gpus/*/power             # the firmware's Dynamic Boost support (NVIDIA's README)
+systemctl status nvidia-powerd                   # stops by itself after a few failed starts when the firmware says no
+sudo rcc system set ctgp-offset 10               # then `nvidia-smi -q -d POWER` again; 0 puts it back
+prime-run glxinfo -B                             # run one program on the NVIDIA GPU (nvidia-prime; needs mesa-utils)
+```
+
+Back to nouveau:
+
+```sh
+sudo systemctl disable nvidia-powerd.service
+sudo pacman -Rns nvidia-open nvidia-utils nvidia-prime
+sudo mkinitcpio -P                               # drops the blacklist from the boot image (sbctl signs it again)
+sudo reboot
+```
 
 ## Passwordless sudo
 
