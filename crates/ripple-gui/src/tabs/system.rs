@@ -36,17 +36,12 @@ impl Ui {
         toggle: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> Div {
         let p = self.p();
-        div()
-            .flex()
-            .justify_between()
-            .items_center()
-            .gap_4()
-            .child(
-                div()
-                    .child(label.to_string())
-                    .child(note(p, what.to_string())),
-            )
-            .child(switch(p, id, on).on_click(cx.listener(move |ui, _, _, cx| toggle(ui, cx))))
+        spread(
+            div()
+                .child(label.to_string())
+                .child(note(p, what.to_string())),
+            switch(p, id, on).on_click(cx.listener(move |ui, _, _, cx| toggle(ui, cx))),
+        )
     }
 
     /// One platform toggle: its name, what it does, and a switch. `i` is its place in the snapshot's

@@ -64,6 +64,19 @@ pub(crate) fn section(p: Palette, title: &str) -> Div {
         )
 }
 
+/// Text on the left, a control on the right, in one row. The text takes what is left and wraps (`min_w(0)`
+/// lets a flex item shrink below the width of its text), the control keeps its size: a long description can
+/// never push a switch out of its card. Every such row goes through here; a test refuses a hand-made one.
+pub(crate) fn spread(left: impl IntoElement, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_4()
+        .child(div().flex_1().min_w(px(0.)).child(left))
+        .child(div().flex_none().child(control))
+}
+
+/// A label and its value. The label keeps its size; a long value wraps at the right instead of running off.
 pub(crate) fn row(
     p: Palette,
     label: impl Into<SharedString>,
@@ -71,10 +84,16 @@ pub(crate) fn row(
 ) -> Div {
     div()
         .flex()
-        .justify_between()
         .gap_4()
-        .child(label.into())
-        .child(div().text_color(rgb(p.muted)).child(value.into()))
+        .child(div().flex_none().child(label.into()))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_right()
+                .text_color(rgb(p.muted))
+                .child(value.into()),
+        )
 }
 
 pub(crate) fn note(p: Palette, text: impl Into<SharedString>) -> Div {
@@ -158,4 +177,27 @@ pub(crate) fn resize_handles() -> Vec<Div> {
             div().bottom_0().left_0().size(c).cursor_nesw_resize(),
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    /// A text-left, control-right row made by hand with `justify_between` lets a long description push the
+    /// control out of its card (it happened to the "Open at login" switch). Use `spread` or `row`.
+    #[test]
+    fn tabs_never_lay_out_text_and_control_by_hand() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tabs");
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let n = std::fs::read_to_string(e.path())
+                .unwrap()
+                .matches(".justify_between()")
+                .count();
+            // profiles.rs has one: the dropdown's trigger, a box of fixed width
+            let allowed = usize::from(name == "profiles.rs");
+            assert_eq!(
+                n, allowed,
+                "{name}: lay a text-and-control row out with widgets::spread, not by hand"
+            );
+        }
+    }
 }
