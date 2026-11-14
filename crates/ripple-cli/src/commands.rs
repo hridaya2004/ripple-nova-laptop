@@ -311,6 +311,7 @@ fn doctor(cli: &Cli) -> CmdResult {
 
     println!("\nRGB solution:");
     match &hid_res {
+        Ok(v) if v.starts_with("not needed") => println!("  {v}"),
         Ok(v) => println!("  {v} → a HID RGB device (only the EC solution is supported)"),
         Err(e) => println!("  {e} → EC-solution RGB likely (registers 1897-1902)"),
     }
