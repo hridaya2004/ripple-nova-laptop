@@ -2570,7 +2570,10 @@ fn main() {
             }
         })
         .detach();
-        open_main_window(cx, shared.clone(), start);
+        if !open_main_window(cx, shared.clone(), start) {
+            cx.quit();
+            return;
+        }
         cx.activate(true);
         // Whoever lives in the user's session (the tray, the launcher) can ask the window to come forward or close.
         if let Some(commands) = commands {
@@ -2595,10 +2598,11 @@ fn main() {
     });
 }
 
-fn open_main_window(cx: &mut App, shared: Arc<Shared>, start: Start) {
+/// Open the window; false (after saying why) when the display refuses it.
+fn open_main_window(cx: &mut App, shared: Arc<Shared>, start: Start) -> bool {
     let (w, h) = start.size.unwrap_or((860., 640.));
     let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-    cx.open_window(
+    let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
@@ -2623,8 +2627,11 @@ fn open_main_window(cx: &mut App, shared: Arc<Shared>, start: Start) {
             }
             ui
         },
-    )
-    .unwrap();
+    );
+    if let Err(e) = &opened {
+        eprintln!("error: could not open the window: {e}");
+    }
+    opened.is_ok()
 }
 
 /// `show` (the tray click, the menu launcher): get a usable window in front of the user. Measured on native
@@ -2640,7 +2647,9 @@ fn show_window(cx: &mut App, shared: Arc<Shared>) {
     if active {
         return;
     }
-    open_main_window(cx, shared, Start::plain());
+    if !open_main_window(cx, shared, Start::plain()) {
+        return; // keep the old one: it is better than none
+    }
     for w in old {
         let _ = w.update(cx, |_, window, _| window.remove_window());
     }
