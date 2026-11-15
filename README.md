@@ -59,10 +59,8 @@ on a real laptop.
   powershare and the firmware's own touchpad toggle (shown as **Touchpad double tap**) are also there. The EC forgets
   USB powershare when the laptop is powered off, so the daemon switches it back on at boot when you had it on. Breathing in suspend is a
   lightbar feature: it only shows on a machine whose EC reports a lightbar. AC Auto-Boot is the same
-  firmware setting Windows shows. On this laptop the firmware reads it at boot from the OEM's UEFI variable
-  (`UniWillVariable`), so the driver shows it as a firmware attribute
-  (`/sys/class/firmware-attributes/uniwill/attributes/ac_auto_boot`) and a change applies after a restart. On a laptop
-  where the embedded controller handles it, it stays the driver's platform attribute.
+  firmware setting Windows shows, and a change applies after a restart. On this laptop the app sets it itself
+  instead of going through the driver: see [Why AC Auto-Boot is set by the app](#why-ac-auto-boot-is-set-by-the-app).
 - **Touchpad double tap**: a double tap in the touchpad's top-left corner switches it off and on, LED included, as on
   Windows. The embedded controller reports it as keys on the internal keyboard (Left Ctrl + Left Meta + F24, scancode
   `0x76`; see [uniwill-laptop issue 22](https://github.com/Wer-Wolf/uniwill-laptop/issues/22)). `install.sh` installs
@@ -198,6 +196,33 @@ The sensors, the keyboard and lightbar LEDs, the battery charge types and the pl
   `git subtree pull --prefix=vendor/uniwill-laptop https://github.com/Wer-Wolf/uniwill-laptop master --squash`.
 - **License**: the driver is GPL-2.0 (`vendor/uniwill-laptop/LICENSE`); the rest of the project is [MIT or Apache-2.0](#license).
 
+### Why AC Auto-Boot is set by the app
+
+Every other toggle goes through the driver. AC Auto-Boot does not on this laptop, for these reasons:
+
+- **The driver's bit does nothing here.** The driver's `ac_auto_boot` is a bit in the embedded controller (register
+  `0x726`, bit 3). On this laptop it reads 0 even while Windows has the feature on, and no EC byte followed the
+  setting in any of our dumps.
+- **The firmware keeps the setting in a UEFI variable.** The OEM Windows service calls it "AC recovery" and stores it
+  in `UniWillVariable` (GUID `9f33f85c-13ca-4fd1-9c4a-96217722c593`), a 180-byte structure: byte 94 says whether
+  the firmware supports the feature, byte 95 is the setting. Switching it in Windows changes exactly byte 95, and a
+  value written from Linux shows up in Windows. The BIOS reads it at boot.
+- **There is no firmware method to call.** The laptop's ACPI tables have no ACPI or WMI method for it: the Uniwill
+  WMI device only passes EC reads and writes through.
+- **The driver's author wants it in userspace.** We wrote a driver patch that showed the variable as a
+  firmware attribute (commit `581ebd8`, since reverted) and offered it upstream. The answer in
+  [uniwill-laptop issue 22](https://github.com/Wer-Wolf/uniwill-laptop/issues/22#issuecomment-6892579241) was that
+  the driver only handles the EC-dependent features and this should stay in userspace. Keeping the patch here
+  anyway would have made `vendor/uniwill-laptop` a fork, with a conflict at every update.
+
+So the app does what the Windows service does (`crates/ripple-hw/src/acboot.rs`):
+
+- It uses the variable only when it has the known size and attributes and its support byte is 1. On any other
+  laptop the toggle stays the driver's platform attribute.
+- A write changes only byte 95, sends the whole variable in one write, puts the file's immutable flag back and
+  reads the result back. Any other layout is refused.
+- It needs root, and the change applies at the next boot.
+
 ## The NVIDIA driver
 
 Only needed for the GPU power settings. The EC holds the GPU's configurable TGP offset (cTGP) and the Dynamic Boost
@@ -313,6 +338,9 @@ sudo rcc gpu set --core 50 --mem 200 # save the clock offsets in MHz; `rcc gpu o
 - This writes EC registers and drives fans by hand. The failsafes above exist, but a wrong register can cost you
   a reboot; the EC rewrites some of what we write, and the register map came from reverse engineering.
 - Raw EC writes (`rcc ec write`) are refused outside the known register map unless you add `--force`.
+- The AC Auto-Boot toggle writes a UEFI variable of the firmware, see
+  [Why AC Auto-Boot is set by the app](#why-ac-auto-boot-is-set-by-the-app). Only one byte changes and unknown
+  layouts are refused, but it is still a write to firmware storage.
 - Turbo applies 65 W PL1/PL2 and 145 W PL4 (the EC's own default for that mode, what the Windows app calls Overboost) and runs hot.
 - The register map in `crates/ripple-core/src/regs.rs` was extracted from the OEM service. The OEM packages
   themselves are proprietary and are not part of this repository (`ControlCenter_*` is git-ignored).

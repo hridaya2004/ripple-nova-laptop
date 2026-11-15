@@ -531,49 +531,8 @@ impl EcAccess for WmiEc {
 pub struct SysfsEc {
     hwmon: std::path::PathBuf,
     platform: Option<std::path::PathBuf>,
-    /// `ac_auto_boot` where the driver shows it as a firmware attribute instead of the platform attribute.
-    ac_boot: Option<FwAttr>,
-}
-
-/// Where the firmware reads AC auto boot from a UEFI variable at boot, the driver has no platform `ac_auto_boot`:
-/// the setting is this firmware attribute (ABI file), and a change applies after a restart.
-const FW_AC_BOOT: &str =
-    "/sys/class/firmware-attributes/uniwill/attributes/ac_auto_boot/current_value";
-/// A read asks the firmware and blocks for about 15 ms, and the window and the daemon look every second: look at
-/// most this often.
-const FW_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
-
-struct FwAttr {
-    path: std::path::PathBuf,
-    seen: std::sync::Mutex<Option<(std::time::Instant, String)>>,
-}
-
-impl FwAttr {
-    fn at(path: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            seen: std::sync::Mutex::new(None),
-        }
-    }
-
-    fn get(&self) -> HwResult<String> {
-        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, v)) = &*seen {
-            if at.elapsed() < FW_MAX_AGE {
-                return Ok(v.clone());
-            }
-        }
-        let v = read_sysfs(&self.path)?;
-        *seen = Some((std::time::Instant::now(), v.clone()));
-        Ok(v)
-    }
-
-    fn set(&self, value: &str) -> HwResult<()> {
-        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        write_sysfs(&self.path, value)?;
-        *seen = Some((std::time::Instant::now(), value.to_string()));
-        Ok(())
-    }
+    /// `ac_auto_boot` where it is a firmware setting instead of the driver's EC bit (see `acboot`).
+    ac_boot: Option<crate::acboot::AcBoot>,
 }
 
 /// The three battery charge modes of the EC, by the kernel's `charge_types` name, with the OEM's own name and
@@ -735,9 +694,7 @@ impl SysfsEc {
             (Some(hwmon), platform) => Ok(Self {
                 hwmon,
                 platform,
-                ac_boot: std::path::Path::new(FW_AC_BOOT)
-                    .exists()
-                    .then(|| FwAttr::at(FW_AC_BOOT)),
+                ac_boot: crate::acboot::AcBoot::probe(),
             }),
             _ => Err(HwError::Unavailable(
                 "uniwill-laptop not bound — run: sudo modprobe uniwill-laptop \
@@ -988,7 +945,7 @@ impl SysfsEc {
     /// Read one platform attribute (`fn_lock`, `ctgp_offset`, …).
     pub fn get_attr(&self, name: &str) -> HwResult<String> {
         match (&self.ac_boot, name) {
-            (Some(fw), "ac_auto_boot") => fw.get(),
+            (Some(fw), "ac_auto_boot") => fw.get().map(|on| u8::from(on).to_string()),
             _ => read_sysfs(&self.platform_attr_path(name)?),
         }
     }
@@ -1016,7 +973,8 @@ impl SysfsEc {
             }
         }
         match (fw, path) {
-            (Some(fw), _) => fw.set(normalised)?,
+            (Some(fw), _) if matches!(normalised, "0" | "1") => fw.set(normalised == "1")?,
+            (Some(_), _) => return Err(HwError::Other("ac_auto_boot accepts: on, off".into())),
             (None, Some(path)) => write_sysfs(&path, normalised)?,
             (None, None) => unreachable!("a platform attribute has a path"),
         }
@@ -1068,25 +1026,36 @@ mod tests {
     }
 
     #[test]
-    fn ac_auto_boot_goes_to_the_firmware_attribute_when_there_is_one() {
-        // plain files stand in for sysfs; as on such a laptop there is no platform `ac_auto_boot`
+    fn ac_auto_boot_goes_to_the_firmware_variable_when_there_is_one() {
+        // plain files stand in for the sysfs directory and the firmware variable: a test never touches the real one
         let dir = std::env::temp_dir().join(format!("ripple-fwboot-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let fw = dir.join("current_value");
-        std::fs::write(&fw, "0\n").unwrap();
+        let var = dir.join("variable");
+        std::fs::write(&var, crate::acboot::image(0)).unwrap();
+        std::fs::write(dir.join("ac_auto_boot"), "0\n").unwrap();
         std::fs::write(dir.join("usb_powershare_high"), "1\n").unwrap();
         let ec = SysfsEc {
             hwmon: std::path::PathBuf::new(),
             platform: Some(dir.clone()),
-            ac_boot: Some(FwAttr::at(&fw)),
+            ac_boot: Some(crate::acboot::AcBoot::at(&var)),
         };
 
         assert_eq!(ec.get_attr("ac_auto_boot").unwrap(), "0");
         ec.set_attr("ac_auto_boot", "on").unwrap();
-        assert_eq!(std::fs::read_to_string(&fw).unwrap().trim(), "1");
         assert_eq!(ec.get_attr("ac_auto_boot").unwrap(), "1");
-        // powershare is still switched off with it, and the settings list shows the firmware value
+        assert_eq!(std::fs::read(&var).unwrap(), crate::acboot::image(1));
+        // powershare is switched off with it, and the driver's EC bit is left alone
         assert_eq!(ec.get_attr("usb_powershare_high").unwrap(), "0");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ac_auto_boot")).unwrap(),
+            "0\n"
+        );
+        // neither a value that is not on/off nor the powershare restore at boot writes the variable
+        assert!(ec.set_attr("ac_auto_boot", "maybe").is_err());
+        ec.restore_powershare().unwrap();
+        assert_eq!(ec.get_attr("usb_powershare_high").unwrap(), "0");
+        assert_eq!(std::fs::read(&var).unwrap(), crate::acboot::image(1));
+        // the settings list shows the firmware value too, not the driver's
         let shown = ec.platform_attrs();
         assert_eq!(
             shown
@@ -1097,6 +1066,9 @@ mod tests {
                 .as_deref(),
             Some("1")
         );
+        // a driver without the platform attribute (older kernel) changes nothing
+        std::fs::remove_file(dir.join("ac_auto_boot")).unwrap();
+        assert_eq!(ec.get_attr("ac_auto_boot").unwrap(), "1");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
