@@ -836,6 +836,8 @@ fn watch(cli: &Cli) -> CmdResult {
     // lock below: it must not wait for a GUI that holds it.
     static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     std::thread::spawn(|| control::fan_loop(&NEVER));
+    // before the popup loop looks, so the restored USB powershare is not announced at every boot
+    control::restore_powershare();
     // Popups for profile / fan boost / toggle changes, whoever makes them: the daemon is always there.
     std::thread::spawn(|| control::popup_loop(&NEVER));
     // keeps the touchpad on or off as the user chose (an "off" does not survive a reboot by itself)
@@ -1491,7 +1493,7 @@ fn system(cli: &Cli, cmd: &Option<SystemCmd>) -> CmdResult {
         }
         Some(SystemCmd::Set { name, value }) => {
             let n = canonical_attr(name)?;
-            let new = u.set_attr(n, value).map_err(|e| {
+            let new = control::set_attr(&u, n, value).map_err(|e| {
                 let allowed = attr_value_hint(n);
                 if allowed.is_empty() {
                     e.to_string()

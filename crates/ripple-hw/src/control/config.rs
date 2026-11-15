@@ -33,6 +33,9 @@ pub struct Config {
     /// NVIDIA GPU clock offsets (only used while the NVIDIA driver is there).
     #[serde(default)]
     pub gpu: crate::gpu::GpuTune,
+    /// USB powershare as last chosen: the EC forgets it when power is cut, the daemon writes it back at start.
+    #[serde(default)]
+    pub usb_powershare: bool,
 }
 
 fn yes() -> bool {
@@ -63,6 +66,7 @@ impl Config {
             keyboard_level: None,
             touchpad_on: true,
             gpu: crate::gpu::GpuTune::default(),
+            usb_powershare: false,
         }
     }
 

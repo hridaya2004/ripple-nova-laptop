@@ -661,7 +661,7 @@ pub const PLATFORM_ATTRS: &[&str] = &[
 
 /// Never both on: the driver doc calls it unsupported, but nothing in the kernel stops it, so
 /// `set_attr` switches the other off when one is enabled.
-const EXCLUSIVE: [&str; 2] = ["ac_auto_boot", "usb_powershare_high"];
+pub(crate) const EXCLUSIVE: [&str; 2] = ["ac_auto_boot", "usb_powershare_high"];
 
 /// The kernel calls the fans "Main"/"Secondary"; the Windows app names them by what they cool:
 /// fan 1 = CPU, fan 2 = GPU.
@@ -1022,6 +1022,15 @@ impl SysfsEc {
         }
         Ok(normalised.to_string())
     }
+
+    /// USB powershare back on after a cold boot (the EC forgets it when power is cut). AC auto boot on wins and
+    /// leaves it off: it was switched on elsewhere (Windows), and `set_attr` would switch it off.
+    pub fn restore_powershare(&self) -> HwResult<()> {
+        if self.get_attr("ac_auto_boot").is_ok_and(|v| v == "1") {
+            return Ok(());
+        }
+        self.set_attr("usb_powershare_high", "1").map(drop)
+    }
 }
 
 impl EcAccess for SysfsEc {
@@ -1125,6 +1134,17 @@ mod tests {
         assert_eq!(
             (get("ac_auto_boot"), get("usb_powershare_high")),
             ("0".into(), "1".into())
+        );
+
+        // the restore after a cold boot switches powershare on, but not over AC auto boot
+        state("0", "0");
+        ec.restore_powershare().unwrap();
+        assert_eq!(get("usb_powershare_high"), "1");
+        state("1", "0");
+        ec.restore_powershare().unwrap();
+        assert_eq!(
+            (get("ac_auto_boot"), get("usb_powershare_high")),
+            ("1".into(), "0".into())
         );
 
         // no partner attribute (older kernel): the write still goes through

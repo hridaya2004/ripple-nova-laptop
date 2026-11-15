@@ -715,8 +715,7 @@ impl Hw {
             .sysfs
             .as_ref()
             .ok_or("uniwill kernel driver not loaded")?;
-        u.set_attr(name, if on { "on" } else { "off" })
-            .map_err(|e| e.to_string())?;
+        control::set_attr(u, name, if on { "on" } else { "off" }).map_err(|e| e.to_string())?;
         Ok(format!("{name} → {}", if on { "on" } else { "off" }))
     }
 }

@@ -56,7 +56,8 @@ on a real laptop.
   pointer, its LED lights, as it does in suspend; bring it back with the toggle or `sudo -n rcc touchpad on|toggle`,
   which the sudoers rule allows without a password, for instance from a keyboard shortcut; the switch also turns off, and the
   popup says so, when the corner double tap silences the pad, see below). AC Auto-Boot, USB
-  powershare and the firmware's own touchpad toggle (shown as **Touchpad double tap**) are also there. Breathing in suspend is a
+  powershare and the firmware's own touchpad toggle (shown as **Touchpad double tap**) are also there. The EC forgets
+  USB powershare when the laptop is powered off, so the daemon switches it back on at boot when you had it on. Breathing in suspend is a
   lightbar feature: it only shows on a machine whose EC reports a lightbar. AC Auto-Boot is the same
   firmware setting Windows shows. On this laptop the firmware reads it at boot from the OEM's UEFI variable
   (`UniWillVariable`), so the driver shows it as a firmware attribute

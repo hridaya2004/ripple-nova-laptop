@@ -40,6 +40,40 @@ pub fn platform_toggles(u: &SysfsEc, has_lightbar: bool) -> Vec<(&'static str, b
     toggles
 }
 
+/// Write a platform attribute and remember USB powershare: the EC forgets it when power is cut, so the daemon
+/// writes it back at start (`restore_powershare`). Saved from the value read back, because switching AC auto
+/// boot on switches powershare off.
+pub fn set_attr(u: &SysfsEc, name: &str, value: &str) -> HwResult<String> {
+    let new = u.set_attr(name, value)?;
+    if crate::linux::EXCLUSIVE.contains(&name) {
+        if let Ok(v) = u.get_attr("usb_powershare_high") {
+            Config::update(|c| {
+                c.usb_powershare = v == "1";
+                Ok(())
+            })?;
+        }
+    }
+    Ok(new)
+}
+
+/// The daemon's start: put the saved USB powershare choice back (see `set_attr`). The driver loads from its DMI
+/// alias and can bind a moment after the daemon starts, so a saved "on" waits up to 5 s for it.
+pub fn restore_powershare() {
+    if !Config::load().usb_powershare {
+        return;
+    }
+    for _ in 0..10 {
+        if let Ok(u) = SysfsEc::probe() {
+            if let Err(e) = u.restore_powershare() {
+                eprintln!("USB powershare: {e}");
+            }
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    eprintln!("USB powershare: not restored, the uniwill driver did not load");
+}
+
 /// What the touchpad switch shows: on only when the pad is powered (driver bound) and reporting. The corner
 /// double tap silences a powered pad (no pointer, LED lit), which is "off" for the user too. `None`: no touchpad.
 /// An unreadable surface switch (not root) counts as reporting.
