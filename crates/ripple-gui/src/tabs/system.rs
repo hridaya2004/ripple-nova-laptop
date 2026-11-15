@@ -9,7 +9,7 @@ pub(crate) fn toggle_description(name: &str) -> &str {
     match name {
         "fn_lock" => "F-keys act as media keys unless Fn is held",
         "super_key_enable" => "The Super (Windows) key works",
-        "ac_auto_boot" => "Power on when AC is plugged in (enabling it turns USB powershare off)",
+        "ac_auto_boot" => "Power on when AC is plugged in; restart first for it to take effect (enabling it turns USB powershare off)",
         "usb_powershare_high" => {
             "Keep the USB ports powered when off (enabling it turns AC auto-boot off)"
         }
