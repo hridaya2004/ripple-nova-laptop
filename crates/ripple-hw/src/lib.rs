@@ -6,6 +6,7 @@
 //! * [`require_root`] — every real hardware path needs root.
 
 #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
 pub mod control;
 #[cfg(target_os = "linux")]
 pub mod gpu;

@@ -531,6 +531,49 @@ impl EcAccess for WmiEc {
 pub struct SysfsEc {
     hwmon: std::path::PathBuf,
     platform: Option<std::path::PathBuf>,
+    /// `ac_auto_boot` where the driver shows it as a firmware attribute instead of the platform attribute.
+    ac_boot: Option<FwAttr>,
+}
+
+/// Where the firmware reads AC auto boot from a UEFI variable at boot, the driver has no platform `ac_auto_boot`:
+/// the setting is this firmware attribute (ABI file), and a change applies after a restart.
+const FW_AC_BOOT: &str =
+    "/sys/class/firmware-attributes/uniwill/attributes/ac_auto_boot/current_value";
+/// A read asks the firmware and blocks for about 15 ms, and the window and the daemon look every second: look at
+/// most this often.
+const FW_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+struct FwAttr {
+    path: std::path::PathBuf,
+    seen: std::sync::Mutex<Option<(std::time::Instant, String)>>,
+}
+
+impl FwAttr {
+    fn at(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            seen: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn get(&self) -> HwResult<String> {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, v)) = &*seen {
+            if at.elapsed() < FW_MAX_AGE {
+                return Ok(v.clone());
+            }
+        }
+        let v = read_sysfs(&self.path)?;
+        *seen = Some((std::time::Instant::now(), v.clone()));
+        Ok(v)
+    }
+
+    fn set(&self, value: &str) -> HwResult<()> {
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        write_sysfs(&self.path, value)?;
+        *seen = Some((std::time::Instant::now(), value.to_string()));
+        Ok(())
+    }
 }
 
 /// The three battery charge modes of the EC, by the kernel's `charge_types` name, with the OEM's own name and
@@ -639,7 +682,7 @@ fn write_sysfs(path: &std::path::Path, value: &str) -> HwResult<()> {
     f.write_all(value.as_bytes()).map_err(|e| map_io(e, path))
 }
 
-fn map_io(e: std::io::Error, path: &std::path::Path) -> HwError {
+pub(crate) fn map_io(e: std::io::Error, path: &std::path::Path) -> HwError {
     if e.kind() == std::io::ErrorKind::PermissionDenied {
         HwError::Permission(format!("{} (run with sudo)", path.display()))
     } else {
@@ -689,7 +732,13 @@ impl SysfsEc {
         }
 
         match (hwmon, platform) {
-            (Some(hwmon), platform) => Ok(Self { hwmon, platform }),
+            (Some(hwmon), platform) => Ok(Self {
+                hwmon,
+                platform,
+                ac_boot: std::path::Path::new(FW_AC_BOOT)
+                    .exists()
+                    .then(|| FwAttr::at(FW_AC_BOOT)),
+            }),
             _ => Err(HwError::Unavailable(
                 "uniwill-laptop not bound — run: sudo modprobe uniwill-laptop \
                  — needs Linux >= 6.19"
@@ -912,14 +961,7 @@ impl SysfsEc {
     pub fn platform_attrs(&self) -> Vec<(&'static str, Option<String>)> {
         PLATFORM_ATTRS
             .iter()
-            .map(|n| {
-                let v = self
-                    .platform
-                    .as_ref()
-                    .map(|p| read_sysfs(&p.join(n)))
-                    .and_then(|r| r.ok());
-                (*n, v)
-            })
+            .map(|n| (*n, self.get_attr(n).ok()))
             .collect()
     }
 
@@ -945,13 +987,20 @@ impl SysfsEc {
 
     /// Read one platform attribute (`fn_lock`, `ctgp_offset`, …).
     pub fn get_attr(&self, name: &str) -> HwResult<String> {
-        read_sysfs(&self.platform_attr_path(name)?)
+        match (&self.ac_boot, name) {
+            (Some(fw), "ac_auto_boot") => fw.get(),
+            _ => read_sysfs(&self.platform_attr_path(name)?),
+        }
     }
 
     /// Write one platform attribute. `on/off/1/0/true/false` are normalised
     /// to `1/0`; anything else (`charging`, integers) is passed through.
     pub fn set_attr(&self, name: &str, value: &str) -> HwResult<String> {
-        let path = self.platform_attr_path(name)?;
+        let fw = self.ac_boot.as_ref().filter(|_| name == "ac_auto_boot");
+        let path = match fw {
+            Some(_) => None,
+            None => Some(self.platform_attr_path(name)?),
+        };
         let lower = value.to_ascii_lowercase();
         let normalised = match lower.as_str() {
             "on" | "true" | "1" | "enable" | "enabled" => "1",
@@ -966,7 +1015,11 @@ impl SysfsEc {
                 }
             }
         }
-        write_sysfs(&path, normalised)?;
+        match (fw, path) {
+            (Some(fw), _) => fw.set(normalised)?,
+            (None, Some(path)) => write_sysfs(&path, normalised)?,
+            (None, None) => unreachable!("a platform attribute has a path"),
+        }
         Ok(normalised.to_string())
     }
 }
@@ -1006,12 +1059,46 @@ mod tests {
     }
 
     #[test]
+    fn ac_auto_boot_goes_to_the_firmware_attribute_when_there_is_one() {
+        // plain files stand in for sysfs; as on such a laptop there is no platform `ac_auto_boot`
+        let dir = std::env::temp_dir().join(format!("ripple-fwboot-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fw = dir.join("current_value");
+        std::fs::write(&fw, "0\n").unwrap();
+        std::fs::write(dir.join("usb_powershare_high"), "1\n").unwrap();
+        let ec = SysfsEc {
+            hwmon: std::path::PathBuf::new(),
+            platform: Some(dir.clone()),
+            ac_boot: Some(FwAttr::at(&fw)),
+        };
+
+        assert_eq!(ec.get_attr("ac_auto_boot").unwrap(), "0");
+        ec.set_attr("ac_auto_boot", "on").unwrap();
+        assert_eq!(std::fs::read_to_string(&fw).unwrap().trim(), "1");
+        assert_eq!(ec.get_attr("ac_auto_boot").unwrap(), "1");
+        // powershare is still switched off with it, and the settings list shows the firmware value
+        assert_eq!(ec.get_attr("usb_powershare_high").unwrap(), "0");
+        let shown = ec.platform_attrs();
+        assert_eq!(
+            shown
+                .iter()
+                .find(|(n, _)| *n == "ac_auto_boot")
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("1")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn auto_boot_and_powershare_exclude_each_other() {
         let dir = std::env::temp_dir().join(format!("ripple-excl-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ec = SysfsEc {
             hwmon: std::path::PathBuf::new(),
             platform: Some(dir.clone()),
+            ac_boot: None,
         };
         let state = |a: &str, p: &str| {
             std::fs::write(dir.join("ac_auto_boot"), format!("{a}\n")).unwrap();

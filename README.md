@@ -57,7 +57,11 @@ on a real laptop.
   which the sudoers rule allows without a password, for instance from a keyboard shortcut; the switch also turns off, and the
   popup says so, when the corner double tap silences the pad, see below). AC Auto-Boot, USB
   powershare and the firmware's own touchpad toggle (shown as **Touchpad double tap**) are also there. Breathing in suspend is a
-  lightbar feature: it only shows on a machine whose EC reports a lightbar.
+  lightbar feature: it only shows on a machine whose EC reports a lightbar. AC Auto-Boot is the same
+  firmware setting Windows shows. On this laptop the firmware reads it at boot from the OEM's UEFI variable
+  (`UniWillVariable`), so the driver shows it as a firmware attribute
+  (`/sys/class/firmware-attributes/uniwill/attributes/ac_auto_boot`) and a change applies after a restart. On a laptop
+  where the embedded controller handles it, it stays the driver's platform attribute.
 - **Touchpad double tap**: a double tap in the touchpad's top-left corner switches it off and on, LED included, as on
   Windows. The embedded controller reports it as keys on the internal keyboard (Left Ctrl + Left Meta + F24, scancode
   `0x76`; see [uniwill-laptop issue 22](https://github.com/Wer-Wolf/uniwill-laptop/issues/22)). `install.sh` installs
