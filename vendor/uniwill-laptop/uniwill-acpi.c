@@ -21,7 +21,6 @@
 #include <linux/device.h>
 #include <linux/device/driver.h>
 #include <linux/dmi.h>
-#include <linux/efi.h>
 #include <linux/errno.h>
 #include <linux/fixp-arith.h>
 #include <linux/hwmon.h>
@@ -30,7 +29,6 @@
 #include <linux/input.h>
 #include <linux/input/sparse-keymap.h>
 #include <linux/kernel.h>
-#include <linux/kobject.h>
 #include <linux/kstrtox.h>
 #include <linux/leds.h>
 #include <linux/led-class-multicolor.h>
@@ -52,12 +50,6 @@
 #include <acpi/battery.h>
 
 #include "uniwill-wmi.h"
-
-/*
- * Declared in drivers/platform/x86/firmware_attributes_class.h, which is not available to
- * out-of-tree modules. The in-tree driver needs to include this header instead.
- */
-extern const struct class firmware_attributes_class;
 
 #define EC_ADDR_BAT_POWER_UNIT_1	0x0400
 
@@ -378,8 +370,6 @@ extern const struct class firmware_attributes_class;
 #define UNIWILL_FEATURE_KEYBOARD_BACKLIGHT	BIT(12)
 #define UNIWILL_FEATURE_AC_AUTO_BOOT		BIT(13)
 #define UNIWILL_FEATURE_USB_POWERSHARE		BIT(14)
-/* Mutually exclusive with the AC auto boot feature */
-#define UNIWILL_FEATURE_UEFI_AC_AUTO_BOOT	BIT(15)
 
 enum usb_c_power_priority_options {
 	USB_C_POWER_PRIORITY_CHARGING = 0,
@@ -429,10 +419,6 @@ struct uniwill_data {
 	struct notifier_block nb;
 	struct mutex usb_c_power_priority_lock; /* Protects dependent bit write and state safe */
 	enum usb_c_power_priority_options last_usb_c_power_priority_option;
-	struct device *fw_attrs_dev;
-	struct mutex fw_attrs_lock;	/* Protects the pending reboot state */
-	bool boot_ac_auto_boot_state;
-	bool pending_reboot;
 };
 
 struct uniwill_battery_entry {
@@ -1165,265 +1151,6 @@ static ssize_t ac_auto_boot_show(struct device *dev, struct device_attribute *at
 }
 
 static DEVICE_ATTR_RW(ac_auto_boot);
-
-/*
- * Some devices do not control the AC auto boot functionality through the EC. Instead the BIOS
- * reads the setting from a UEFI variable during boot. The same variable is used by the OEM
- * software and contains many unrelated settings, only the fields used by this driver are named.
- */
-struct uniwill_nvram {
-	u8 reserved1[94];
-	u8 ac_recovery_support;
-	u8 ac_recovery_status;
-	u8 reserved2[84];
-} __packed;
-
-static_assert(sizeof(struct uniwill_nvram) == 180);
-
-static efi_char16_t uniwill_nvram_name[] = L"UniWillVariable";
-static efi_guid_t uniwill_nvram_guid =
-	EFI_GUID(0x9f33f85c, 0x13ca, 0x4fd1, 0x9c, 0x4a, 0x96, 0x21, 0x77, 0x22, 0xc5, 0x93);
-
-/* The caller needs to hold the efivar lock */
-static int uniwill_nvram_read(struct uniwill_nvram *nvram, u32 *attr)
-{
-	unsigned long size = sizeof(*nvram);
-	efi_status_t status;
-
-	status = efivar_get_variable(uniwill_nvram_name, &uniwill_nvram_guid, attr, &size, nvram);
-	if (status != EFI_SUCCESS)
-		return efi_status_to_err(status);
-
-	if (size != sizeof(*nvram) || nvram->ac_recovery_support != 1)
-		return -ENODEV;
-
-	return 0;
-}
-
-static int uniwill_nvram_read_ac_auto_boot(bool *enable)
-{
-	struct uniwill_nvram nvram;
-	u32 attr;
-	int ret;
-
-	ret = efivar_lock();
-	if (ret < 0)
-		return ret;
-
-	ret = uniwill_nvram_read(&nvram, &attr);
-	efivar_unlock();
-	if (ret < 0)
-		return ret;
-
-	*enable = nvram.ac_recovery_status;
-
-	return 0;
-}
-
-static int uniwill_nvram_write_ac_auto_boot(bool enable)
-{
-	struct uniwill_nvram nvram;
-	efi_status_t status;
-	u32 attr;
-	int ret;
-
-	ret = efivar_lock();
-	if (ret < 0)
-		return ret;
-
-	/* All other settings inside the variable need to be preserved */
-	ret = uniwill_nvram_read(&nvram, &attr);
-	if (ret < 0)
-		goto out;
-
-	if (nvram.ac_recovery_status == enable)
-		goto out;
-
-	nvram.ac_recovery_status = enable;
-	status = efivar_set_variable_locked(uniwill_nvram_name, &uniwill_nvram_guid, attr,
-					    sizeof(nvram), &nvram, false);
-	ret = efi_status_to_err(status);
-
-out:
-	efivar_unlock();
-
-	return ret;
-}
-
-static struct uniwill_data *uniwill_fw_attrs_kobj_to_data(struct kobject *kobj)
-{
-	/* The attributes kset is a direct child of the firmware attributes class device */
-	return dev_get_drvdata(kobj_to_dev(kobj->parent));
-}
-
-static ssize_t type_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "enumeration\n");
-}
-
-static struct kobj_attribute fw_attr_type = __ATTR_RO(type);
-
-static ssize_t possible_values_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "0;1\n");
-}
-
-static struct kobj_attribute fw_attr_possible_values = __ATTR_RO(possible_values);
-
-static ssize_t display_name_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	return sysfs_emit(buf, "Boot automatically when being connected to a power source\n");
-}
-
-static struct kobj_attribute fw_attr_display_name = __ATTR_RO(display_name);
-
-static ssize_t display_name_language_code_show(struct kobject *kobj, struct kobj_attribute *attr,
-					       char *buf)
-{
-	return sysfs_emit(buf, "en_US.UTF-8\n");
-}
-
-static struct kobj_attribute fw_attr_display_name_language_code =
-	__ATTR_RO(display_name_language_code);
-
-static ssize_t current_value_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	bool enable;
-	int ret;
-
-	ret = uniwill_nvram_read_ac_auto_boot(&enable);
-	if (ret < 0)
-		return ret;
-
-	return sysfs_emit(buf, "%d\n", enable);
-}
-
-static ssize_t current_value_store(struct kobject *kobj, struct kobj_attribute *attr,
-				   const char *buf, size_t count)
-{
-	struct uniwill_data *data = uniwill_fw_attrs_kobj_to_data(kobj);
-	bool enable, pending_reboot;
-	int ret;
-
-	ret = kstrtobool(buf, &enable);
-	if (ret < 0)
-		return ret;
-
-	guard(mutex)(&data->fw_attrs_lock);
-
-	ret = uniwill_nvram_write_ac_auto_boot(enable);
-	if (ret < 0)
-		return ret;
-
-	/* The BIOS only applies the setting during boot */
-	pending_reboot = enable != data->boot_ac_auto_boot_state;
-	if (pending_reboot && !data->pending_reboot)
-		kobject_uevent(&data->fw_attrs_dev->kobj, KOBJ_CHANGE);
-
-	data->pending_reboot = pending_reboot;
-
-	return count;
-}
-
-static struct kobj_attribute fw_attr_current_value = __ATTR_RW(current_value);
-
-static struct attribute *uniwill_fw_attr_ac_auto_boot_attrs[] = {
-	&fw_attr_type.attr,
-	&fw_attr_possible_values.attr,
-	&fw_attr_display_name.attr,
-	&fw_attr_display_name_language_code.attr,
-	&fw_attr_current_value.attr,
-	NULL
-};
-
-static const struct attribute_group uniwill_fw_attr_ac_auto_boot_group = {
-	.name = "ac_auto_boot",
-	.attrs = uniwill_fw_attr_ac_auto_boot_attrs,
-};
-
-static ssize_t pending_reboot_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
-{
-	struct uniwill_data *data = uniwill_fw_attrs_kobj_to_data(kobj);
-
-	guard(mutex)(&data->fw_attrs_lock);
-
-	return sysfs_emit(buf, "%d\n", data->pending_reboot);
-}
-
-static struct kobj_attribute fw_attr_pending_reboot = __ATTR_RO(pending_reboot);
-
-static struct attribute *uniwill_fw_attrs[] = {
-	&fw_attr_pending_reboot.attr,
-	NULL
-};
-
-static const struct attribute_group uniwill_fw_attrs_group = {
-	.attrs = uniwill_fw_attrs,
-};
-
-static const struct attribute_group *uniwill_fw_attrs_groups[] = {
-	&uniwill_fw_attrs_group,
-	&uniwill_fw_attr_ac_auto_boot_group,
-	NULL
-};
-
-static void uniwill_fw_attrs_dev_unregister(void *context)
-{
-	struct device *dev = context;
-
-	device_unregister(dev);
-}
-
-static void uniwill_fw_attrs_kset_unregister(void *context)
-{
-	struct kset *kset = context;
-
-	kset_unregister(kset);
-}
-
-static int uniwill_fw_attrs_init(struct uniwill_data *data)
-{
-	struct kset *kset;
-	int ret;
-
-	if (!uniwill_device_supports(data, UNIWILL_FEATURE_UEFI_AC_AUTO_BOOT))
-		return 0;
-
-	if (!efivar_is_available() || !efivar_supports_writes()) {
-		dev_warn(data->dev, "UEFI variables are not writable, AC auto boot unavailable\n");
-		return 0;
-	}
-
-	ret = uniwill_nvram_read_ac_auto_boot(&data->boot_ac_auto_boot_state);
-	if (ret < 0) {
-		dev_warn(data->dev, "AC auto boot is not supported by the firmware: %d\n", ret);
-		return 0;
-	}
-
-	ret = devm_mutex_init(data->dev, &data->fw_attrs_lock);
-	if (ret < 0)
-		return ret;
-
-	data->fw_attrs_dev = device_create(&firmware_attributes_class, data->dev, MKDEV(0, 0),
-					   data, DRIVER_NAME);
-	if (IS_ERR(data->fw_attrs_dev))
-		return PTR_ERR(data->fw_attrs_dev);
-
-	ret = devm_add_action_or_reset(data->dev, uniwill_fw_attrs_dev_unregister,
-				       data->fw_attrs_dev);
-	if (ret < 0)
-		return ret;
-
-	kset = kset_create_and_add("attributes", NULL, &data->fw_attrs_dev->kobj);
-	if (!kset)
-		return -ENOMEM;
-
-	ret = devm_add_action_or_reset(data->dev, uniwill_fw_attrs_kset_unregister, kset);
-	if (ret < 0)
-		return ret;
-
-	return sysfs_create_groups(&kset->kobj, uniwill_fw_attrs_groups);
-}
 
 static int uniwill_write_usb_powershare_high(struct uniwill_data *data, bool status)
 {
@@ -2701,10 +2428,6 @@ static int uniwill_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	ret = uniwill_fw_attrs_init(data);
-	if (ret < 0)
-		return ret;
-
 	return uniwill_input_init(data);
 }
 
@@ -3067,7 +2790,7 @@ static struct uniwill_device_descriptor ripple_nova_descriptor __initdata = {
 		    UNIWILL_FEATURE_SECONDARY_FAN |
 		    UNIWILL_FEATURE_NVIDIA_CTGP_CONTROL | // TODO
 		    UNIWILL_FEATURE_KEYBOARD_BACKLIGHT |
-		    UNIWILL_FEATURE_UEFI_AC_AUTO_BOOT |
+		    UNIWILL_FEATURE_AC_AUTO_BOOT |	// TODO
 		    UNIWILL_FEATURE_USB_POWERSHARE,
 	.kbd_led_single_color = false,
 	.kbd_led_max_brightness = 4,
@@ -3965,7 +3688,6 @@ static void __exit uniwill_exit(void)
 }
 module_exit(uniwill_exit);
 
-MODULE_IMPORT_NS("EFIVAR");
 MODULE_AUTHOR("Armin Wolf <W_Armin@gmx.de>");
 MODULE_DESCRIPTION("Uniwill notebook driver");
 MODULE_LICENSE("GPL");

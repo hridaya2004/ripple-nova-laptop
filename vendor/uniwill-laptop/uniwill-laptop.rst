@@ -106,10 +106,6 @@ The ``uniwill-laptop`` driver allows the user to configure if the system should 
 boot when being connected to a power source, see
 Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
 
-On some devices this setting is not handled by the embedded controller, but is instead read by the
-BIOS from a UEFI variable during boot. The driver exposes it through the firmware attributes class
-on such devices, so changing it only takes effect after a reboot.
-
 USB Powershare
 --------------
 
