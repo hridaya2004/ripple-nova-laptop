@@ -8,8 +8,8 @@
 //! when there are none). "Enable / Disable notifications" works the same way (`rcc popups on|off`); the
 //! popups' state is read from the window's settings file, which anyone can read.
 //!
-//! GNOME shows tray icons only with the AppIndicator extension. Until a tray host exists the helper
-//! simply waits (it does not exit), so enabling the extension later is enough.
+//! KDE Plasma hosts the icon natively; GNOME only with the AppIndicator extension. Until a tray host exists
+//! the helper simply waits (it does not exit), so enabling the extension later is enough.
 
 use std::process::Command;
 use std::time::Duration;

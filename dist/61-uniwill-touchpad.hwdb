@@ -3,7 +3,8 @@
 # Uniwill / Tongfang laptops (the Ripple Nova, GM5AGFO): a double tap in the top-left corner of the touchpad
 # makes the embedded controller type Left Ctrl + Left Meta + F24 on the internal keyboard (the Windows
 # touchpad-toggle chord). Scancode 0x76 is F24. Make it the touchpad-toggle key, which the desktop acts on
-# (GNOME and KDE switch the touchpad off and on; the touchpad's LED follows).
+# (GNOME did not act on the raw chord, so ripple-nova.service handles it too). install.sh leaves this file out on
+# KDE Plasma: Plasma already acts on Ctrl+Meta+F24 by itself (xkeyboard-config maps it to XF86TouchpadToggle).
 # Found with `evtest /dev/input/event3`; see https://github.com/Wer-Wolf/uniwill-laptop/issues/22
 evdev:name:AT Translated Set 2 keyboard:dmi:*
  KEYBOARD_KEY_76=touchpad_toggle

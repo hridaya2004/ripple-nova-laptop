@@ -11,15 +11,16 @@ It is written by hand with AI assistance (Claude), and every hardware behaviour 
 on a real laptop.
 
 > **Tested on exactly one machine**: a Tongfang GK7N-class laptop (EC project id 16, `GK7NXXR`, DMI reads
-> "Standard"), Arch Linux, kernel 7.2, GNOME on Wayland. Other Uniwill laptops may work; nothing here has been
-> verified on them. It writes to the embedded controller (EC), so read [the risks](#risks) first.
+> "Standard"), Arch Linux, kernel 7.2, GNOME on Wayland. KDE Plasma should work (nothing in it is GNOME-only; its own
+> touchpad shortcut needs one setting changed, see *Touchpad double tap*) but is untested. Other Uniwill laptops may work; nothing here has been verified on them. It writes to the embedded
+> controller (EC), so read [the risks](#risks) first.
 
 | Part | What it is |
 |---|---|
 | `rcc` | command line: `rcc doctor`, `status`, `mode`, `fan`, `rgb`, `battery`, `system`, `touchpad`, `popups`, `ec` (raw EC access, for development) |
 | `rcc-gui` | the window (GPUI): profiles, fans, keyboard, toggles, settings. Needs root; started through `ripple-nova` |
 | `ripple-nova.service` | root daemon (`rcc watch`): follows the hardware mode button, restores the profile at boot, runs the custom fan profile, sends the popups |
-| `rcc-tray` | tray icon (runs as you; started by the window, and at login when *Open at login* is on): a click opens the window, the menu switches the performance profile. GNOME needs the AppIndicator extension |
+| `rcc-tray` | tray icon (runs as you; started by the window, and at login when *Open at login* is on): a click opens the window, the menu switches the performance profile. KDE Plasma shows it as is; GNOME needs the AppIndicator extension |
 | `ripple-nova` | launcher for the window (menu entry "Ripple Control Center") |
 | `vendor/uniwill-laptop` | the kernel driver the sensors, LEDs and toggles come from, [vendored in this repository](#the-uniwill-laptop-driver) |
 
@@ -68,10 +69,17 @@ on a real laptop.
   act on. GNOME did not act on it for the real keyboard, so the service (`rcc watch`) does as well: it switches the
   touchpad's *surface switch* (HID feature report `0x07`, off = no pointer and the LED lit, the pad stays awake so the
   same gesture brings it back). A pad left silent comes back when the service starts and with `rcc touchpad on`;
-  `rcc touchpad status` tells the two kinds of off apart. If a desktop does start acting on the touchpad-toggle key too,
-  the touchpad would toggle twice: delete the hwdb entry then (`sudo rm /etc/udev/hwdb.d/61-uniwill-touchpad.hwdb`,
-  `sudo systemd-hwdb update`, `sudo udevadm trigger --subsystem-match=input`); the service reads F24 with Ctrl and Meta
-  either way.
+  `rcc touchpad status` tells the two kinds of off apart.
+
+  **KDE Plasma** acts on the gesture by itself, with no hwdb entry: xkeyboard-config makes Ctrl+Super+F24 the
+  touchpad-toggle key, and Plasma's *Toggle Touchpad* shortcut is bound to it. Plasma switches the pointer off in
+  software, with no LED, on top of the service's switch. The two stay in step only until one of them is switched alone
+  (Plasma remembers its state across logins, the service starts with the pad on); from then on every gesture leaves the
+  pad off one way or the other. So clear Plasma's shortcut once (System Settings → Keyboard → Shortcuts → Touchpad,
+  clear *Toggle Touchpad*), and turn the touchpad on in System Settings → Mouse & Touchpad if Plasma had it off. The
+  service then owns the gesture and the LED. Without the service, Plasma's switch is all there is and the LED stays
+  dark: it belongs to the touchpad, not to the uniwill driver. `install.sh` leaves the hwdb entry out on Plasma (and
+  removes an older one), since it adds nothing there, and prints this step at the end.
 - **Tray**: click the icon to open the window. Its menu has a **Performance profile** shortcut (the current profile
   ticked, "service not running" when the daemon is down) and an **Enable / Disable notifications** item. Without the sudoers rule,
   polkit asks for a password instead.
@@ -127,13 +135,18 @@ rustup default stable                      # Rust 1.89 or newer
 # window (GPUI) runtime libraries, usually present with a desktop:
 sudo pacman -S --needed wayland libxkbcommon vulkan-icd-loader fontconfig freetype2
 # plus the Vulkan driver for your GPU: vulkan-intel, vulkan-radeon, vulkan-nouveau (or nvidia-utils, see below)
-# GNOME only, for the tray icon:
+# GNOME only, for the tray icon (KDE Plasma needs nothing extra):
 sudo pacman -S --needed gnome-shell-extension-appindicator
 ```
 
 - `linux-headers` must match the running kernel (`pacman -Q linux-headers` against `uname -r`); a kernel update
   needs a matching headers update and a rerun of `./install.sh`.
 - `acpi_call` gives the EC access (`/proc/acpi/call`); on kernels other than Arch's `linux`, use `acpi_call-dkms`.
+- A kernel built with clang (CachyOS's `-lto` kernels; `grep CC_IS_CLANG /lib/modules/$(uname -r)/build/.config`) needs
+  its modules built with clang as well: `sudo pacman -S --needed clang lld llvm`. `install.sh` sees such a kernel and
+  builds `vendor/uniwill-laptop` with `LLVM=1` (by hand: `make -C vendor/uniwill-laptop LLVM=1`); with gcc the build
+  stops at the kernel's `-fsplit-lto-unit`. Checked on CachyOS `linux-cachyos-rt-bore-lto` 7.3.4: the module builds,
+  and `acpi_call-dkms` builds through dkms.
 - `libnotify` (`notify-send`) delivers popups; `util-linux` (`setpriv`, `flock`) and `sudo` are needed at runtime;
   `polkit` is the fallback when the passwordless rule is not installed.
 - **GNOME tray**: install the extension, log out and in once, then it is enabled (or
@@ -149,7 +162,7 @@ git clone <this repository> && cd ripple-nova
 
 It builds the Rust workspace (release), builds the `uniwill-laptop` kernel module for the running kernel, and
 installs: `rcc`, `rcc-gui`, `rcc-tray`, `ripple-nova` (to `/usr/local/bin`), the menu entry and icon,
-`ripple-nova.service` (enabled and started), a module-load entry (`acpi_call`), a udev hwdb entry for the touchpad's corner gesture (see *Touchpad double tap* below) and the sudoers
+`ripple-nova.service` (enabled and started), a module-load entry (`acpi_call`), a udev hwdb entry for the touchpad's corner gesture (not on KDE Plasma, see *Touchpad double tap* below) and the sudoers
 rule. It does **not** turn on starting at login: that is *Open at login* in
 Settings (and an install removes the always-on tray login entry that older versions put in `/etc/xdg/autostart`).
 Options:
@@ -164,8 +177,8 @@ Options:
 Then open **Ripple Control Center** from the menu (or run `ripple-nova`), and check `sudo rcc doctor`.
 To have the app start at login, switch on *Open at login* in Settings. Settings live in `/etc/ripple-nova/`.
 
-**Popups and Do Not Disturb**: GNOME keeps banners away while Do Not Disturb is on; the notification still lands
-in the tray.
+**Popups and Do Not Disturb**: GNOME and KDE Plasma keep banners away while Do Not Disturb is on; the notification
+still lands in the notification list.
 
 ## The uniwill-laptop driver
 

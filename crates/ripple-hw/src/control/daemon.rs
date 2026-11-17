@@ -179,6 +179,9 @@ pub fn wait_mode_key(dev: &mut std::fs::File) -> HwResult<()> {
 /// controller types on the internal keyboard (Left Ctrl + Left Meta + F24); the kernel does nothing with them
 /// and GNOME did not act on the real ones, so the daemon does what the firmware's own gesture does: it switches
 /// the touchpad's surface off or on (LED included). The pad stays awake, so the same gesture brings it back.
+/// KDE Plasma does act on them (xkeyboard-config makes Ctrl+Super+F24 the touchpad-toggle key, and Plasma's
+/// "Toggle Touchpad" shortcut is bound to it): it disables the pointer in software, with no LED, on top of this
+/// switch, and the two drift apart unless that shortcut is cleared (see README).
 pub fn touchpad_key_loop(stop: &std::sync::atomic::AtomicBool) {
     use std::sync::atomic::Ordering::Relaxed;
     // never start with the pad silenced by an earlier run

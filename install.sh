@@ -12,11 +12,12 @@
 # + a menu entry and icon, the systemd service ripple-nova.service (runs `rcc watch` as root: follows
 # the mode button, keeps the profile and the button lights in sync, runs the custom fan profile, sends the
 # popups), the tray icon helper rcc-tray (starts with the window, and at login when Settings > Open at login is
-# on; GNOME needs its AppIndicator extension to show it), and
+# on; GNOME needs its AppIndicator extension to show it, KDE Plasma shows it as is), and
 # the module list that loads acpi_call and uniwill-laptop at boot, a udev hwdb entry that turns the touchpad's
-# double-tap corner gesture (F24) into the touchpad-toggle key, and the uniwill-laptop kernel module
+# double-tap corner gesture (F24) into the touchpad-toggle key (not on KDE Plasma), and the uniwill-laptop kernel module
 # itself, built from vendor/uniwill-laptop (a git subtree of Wer-Wolf/uniwill-laptop) for the running kernel
-# into /usr/lib/modules/<kernel>/updates/. It has to be rebuilt after a kernel update: run this again.
+# into /usr/lib/modules/<kernel>/updates/ (with LLVM=1 when the kernel was built with clang, which needs clang,
+# lld and llvm). It has to be rebuilt after a kernel update: run this again.
 set -euo pipefail
 
 PREFIX=${PREFIX:-/usr/local}
@@ -38,6 +39,7 @@ if [ -z "$DESTDIR" ] && [ "$(id -u)" -ne 0 ]; then
     SUDO=sudo
 fi
 live() { [ -z "$DESTDIR" ]; }   # touching the real system (systemd, modules)?
+plasma() { [[ ":${XDG_CURRENT_DESKTOP:-}:" == *:KDE:* ]]; }   # installing from a KDE Plasma session?
 
 uninstall() {
     if live; then
@@ -113,10 +115,23 @@ if [ "$MODULE" = 1 ]; then
        Arch:          sudo pacman -S linux-headers   (it must match the running kernel: $KREL)
        Debian/Ubuntu: sudo apt install linux-headers-\$(uname -r)
        or skip the module with ./install.sh --no-module"
-        command -v make >/dev/null && command -v gcc >/dev/null || die "make and gcc are needed to build the uniwill-laptop module (Arch: sudo pacman -S base-devel)"
-        say "building the uniwill-laptop kernel module for $KREL"
-        as_builder make -C vendor/uniwill-laptop clean >/dev/null 2>&1 || true
-        as_builder make -C vendor/uniwill-laptop >/dev/null || die "building the kernel module failed (run: make -C vendor/uniwill-laptop)"
+        # A kernel built with clang (CachyOS's -lto kernels) needs its modules built with clang as well: gcc stops at
+        # the kernel's -fsplit-lto-unit. kbuild's LLVM=1 picks clang, ld.lld and the llvm-* tools, and make passes the
+        # variable on to the kernel's own make through vendor/uniwill-laptop/Makefile.
+        KBUILD_ARGS=
+        if grep -qs '^CONFIG_CC_IS_CLANG=y' "/lib/modules/$KREL/build/.config"; then
+            for tool in make clang ld.lld llvm-ar llvm-nm llvm-objcopy; do
+                command -v "$tool" >/dev/null || die "the kernel $KREL was built with clang, so its modules are too, and '$tool' is missing.
+       Arch: sudo pacman -S --needed base-devel clang lld llvm
+       or skip the module with ./install.sh --no-module"
+            done
+            KBUILD_ARGS=LLVM=1
+        else
+            command -v make >/dev/null && command -v gcc >/dev/null || die "make and gcc are needed to build the uniwill-laptop module (Arch: sudo pacman -S base-devel)"
+        fi
+        say "building the uniwill-laptop kernel module for $KREL${KBUILD_ARGS:+ ($KBUILD_ARGS)}"
+        as_builder make -C vendor/uniwill-laptop $KBUILD_ARGS clean >/dev/null 2>&1 || true
+        as_builder make -C vendor/uniwill-laptop $KBUILD_ARGS >/dev/null || die "building the kernel module failed (run: make -C vendor/uniwill-laptop $KBUILD_ARGS)"
         KO=vendor/uniwill-laptop/uniwill-laptop.ko
         [ -f "$KO" ] || die "the build produced no $KO"
     fi
@@ -141,7 +156,15 @@ $SUDO install -Dm644 "$tmp/unit" "$DESTDIR/etc/systemd/system/$UNIT"
 $SUDO install -Dm644 dist/modules-load.conf "$DESTDIR/etc/modules-load.d/ripple-nova.conf"
 # Older versions forced the module here (force=1); that would now override the driver's own Ripple Nova entry.
 $SUDO rm -f "$DESTDIR/etc/modprobe.d/ripple-nova.conf"
-$SUDO install -Dm644 dist/61-uniwill-touchpad.hwdb "$DESTDIR/etc/udev/hwdb.d/61-uniwill-touchpad.hwdb"
+# Plasma needs no mapping to act on the gesture: xkeyboard-config makes Ctrl+Super+F24 the touchpad-toggle key and
+# Plasma's "Toggle Touchpad" shortcut is bound to it, so it switches the pointer off in software (no LED) on top of
+# the service's switch. The mapping would add nothing there, so leave it out (the service reads the plain
+# Ctrl+Meta+F24 chord). The shortcut itself is the user's setting: the notes at the end say to clear it.
+if plasma; then
+    $SUDO rm -f "$DESTDIR/etc/udev/hwdb.d/61-uniwill-touchpad.hwdb"
+else
+    $SUDO install -Dm644 dist/61-uniwill-touchpad.hwdb "$DESTDIR/etc/udev/hwdb.d/61-uniwill-touchpad.hwdb"
+fi
 if [ -n "$KO" ]; then
     # the same as: mkdir -p /usr/lib/modules/$(uname -r)/updates && cp uniwill-laptop.ko there && depmod -a
     $SUDO install -Dm644 "$KO" "$DESTDIR/usr/lib/modules/$KREL/updates/uniwill-laptop.ko"
@@ -166,7 +189,7 @@ if [ "$SUDOERS" = 1 ]; then
 fi
 
 if live; then
-    # the touchpad's corner double tap types Ctrl+Meta+F24: map F24 to the touchpad-toggle key (takes effect now)
+    # the touchpad's corner double tap types Ctrl+Meta+F24: apply (or, on Plasma, drop) the F24 mapping now
     $SUDO systemd-hwdb update && $SUDO udevadm trigger --subsystem-match=input --action=change \
         || warn "could not apply the touchpad-toggle key mapping: sudo systemd-hwdb update && sudo udevadm trigger --subsystem-match=input"
     command -v update-desktop-database >/dev/null && $SUDO update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
@@ -211,6 +234,15 @@ if [ "$PASSWORDLESS" = 1 ]; then
 else
     window="asks for your password (polkit)"
 fi
+if plasma; then
+    TOUCHPAD_NOTE="
+           KDE Plasma switches the pointer off on this gesture too, with no LED, and the two get out of step.
+           Do this once: System Settings > Keyboard > Shortcuts > Touchpad: clear \"Toggle Touchpad\".
+           If the pointer is off after that, turn the touchpad on in System Settings > Mouse & Touchpad."
+else
+    TOUCHPAD_NOTE=" (F24 is mapped to the touchpad-toggle key:
+           /etc/udev/hwdb.d/61-uniwill-touchpad.hwdb)"
+fi
 cat <<MSG
 
 Installed.
@@ -218,10 +250,9 @@ Installed.
   window   ripple-nova   (menu: Ripple Control Center), $window
   tray     rcc-tray, started by the window; Settings > Open at login starts it at login (with the window, or
            alone with Start minimized). Its menu switches the performance profile.
-           GNOME shows it only with the AppIndicator extension:
+           KDE Plasma shows it as is; GNOME only with the AppIndicator extension:
            sudo pacman -S gnome-shell-extension-appindicator, then log out and in
-  touchpad double-tap its top-left corner to switch it off and on (F24 is mapped to the touchpad-toggle key:
-           /etc/udev/hwdb.d/61-uniwill-touchpad.hwdb)
+  touchpad double-tap its top-left corner to switch it off and on$TOUCHPAD_NOTE
   cli      sudo rcc doctor | status | mode get|set|next
   remove   ./install.sh --uninstall
 MSG
